@@ -6,9 +6,6 @@ const api = axios.create({
   baseURL: '/api', // Use relative path since Vite proxy is configured
   timeout: 10000,
   withCredentials: true, // Important for cookies
-  headers: {
-    'Content-Type': 'application/json',
-  },
 });
 
 // Utility function to check if user is authenticated
@@ -23,8 +20,11 @@ const isAuthenticated = () => {
 
 // Add auth token to requests
 api.interceptors.request.use((config) => {
-  // Skip requests if not authenticated (except for auth endpoints)
-  if (!isAuthenticated() && !config.url?.startsWith('/auth/')) {
+  // Allow public endpoints without auth
+  const __url = config.url || '';
+  const __publicPrefixes = ['/auth/', '/seller', '/products', '/categories', '/search', '/uploads', '/health'];
+  const __isPublic = __publicPrefixes.some(p => __url.startsWith(p));
+  if (!isAuthenticated() && !__isPublic) {
     console.log('⚠️ Skipping request - user not authenticated:', config.url);
     return Promise.reject(new Error('User not authenticated'));
   }
@@ -46,7 +46,36 @@ api.interceptors.request.use((config) => {
     // Try to get token from cookies first, fallback to localStorage
     token = CookieManager.getAuthToken() || localStorage.getItem('token');
   }
+
+  // Ensure admin endpoints always use the admin token (not impersonation)
+  try {
+    const __url = config.url || '';
+    if (__url.startsWith('/admin')) {
+      const adminToken = CookieManager.getAuthToken() || localStorage.getItem('token');
+      if (adminToken && adminToken !== 'undefined' && adminToken.trim() !== '') {
+        token = adminToken;
+        console.log('�Y"? Admin path detected in interceptor, using admin token');
+      }
+    }
+  } catch (e) {
+    // No-op: conservative fallback keeps previously selected token
+  }
   
+  // Ensure proper Content-Type based on payload
+  try {
+    const isFormData = (typeof FormData !== 'undefined') && (config.data instanceof FormData);
+    if (isFormData) {
+      // Let the browser set the multipart boundary
+      if (config.headers) {
+        delete (config.headers as any)['Content-Type'];
+      }
+    } else {
+      if (config.headers && !(config.headers as any)['Content-Type']) {
+        (config.headers as any)['Content-Type'] = 'application/json';
+      }
+    }
+  } catch {}
+
   // Debug logging for authentication
   console.log('🔐 Request interceptor:', {
     url: config.url,
@@ -88,10 +117,10 @@ api.interceptors.response.use(
     if (error.response?.status === 429 && !originalRequest._retry) {
       originalRequest._retry = true;
       
-      const retryAfter = error.response.headers['retry-after'] || 5;
+      const retryAfter = Math.min(parseInt(error.response.headers['retry-after']) || 5, 30); // Cap at 30 seconds
       console.log(`Rate limited. Retrying after ${retryAfter} seconds...`);
       
-      // Wait for the specified retry time
+      // Wait for the specified retry time, but cap it at 30 seconds
       await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
       
       // Retry the request
@@ -690,6 +719,10 @@ export const financeApi = {
     const response = await api.post('/finance/request-payout', { amount });
     return response.data;
   },
+  requestPayoutWithAccount: async (amount: number, accountId?: string) => {
+    const response = await api.post('/finance/request-payout', { amount, accountId });
+    return response.data;
+  },
   
   getAnalytics: async (period = 'monthly') => {
     const response = await api.get('/finance/analytics', { params: { period } });
@@ -709,6 +742,54 @@ export const financeApi = {
     // This would need to be handled differently in the new system
     // For now, return a placeholder response
     return { message: 'Investment functionality moved to new system' };
+  },
+
+  // Get available payment methods for deposits
+  getDepositPaymentMethods: async () => {
+    const response = await api.get('/finance/payment-methods/deposit');
+    return response.data;
+  },
+
+  // Get available withdrawal methods
+  getWithdrawalMethods: async () => {
+    const response = await api.get('/finance/payment-methods/withdrawal');
+    return response.data;
+  },
+  // Seller withdrawal accounts
+  getWithdrawalAccounts: async () => {
+    const response = await api.get('/finance/withdrawal-accounts');
+    return response.data;
+  },
+  addWithdrawalAccount: async (payload: { methodId: string; label?: string; details?: any; isDefault?: boolean }) => {
+    const response = await api.post('/finance/withdrawal-accounts', payload);
+    return response.data;
+  },
+  deleteWithdrawalAccount: async (id: string) => {
+    const response = await api.delete(`/finance/withdrawal-accounts/${id}`);
+    return response.data;
+  },
+  
+  // Submit a manual deposit with screenshot
+  submitManualDeposit: async (params: { amount: number; methodId: string; reference?: string; screenshot: File; }) => {
+    const form = new FormData();
+    form.append('amount', String(params.amount));
+    form.append('methodId', params.methodId);
+    if (params.reference) form.append('reference', params.reference);
+    form.append('screenshot', params.screenshot);
+    const response = await api.post('/finance/deposits', form, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    return response.data;
+  },
+  // Get computed available balance
+  getBalance: async () => {
+    const response = await api.get('/finance/balance');
+    return response.data;
+  },
+  // List current seller's manual deposits
+  listMyDeposits: async () => {
+    const response = await api.get('/finance/deposits/my');
+    return response.data;
   },
   
 
@@ -734,6 +815,56 @@ export const adminApi = {
   // Get seller timeframe statistics (Today, 7 Days, 30 Days, Total)
   getSellerTimeframeStats: async (sellerId: string) => {
     const response = await api.get(`/admin/sellers/${sellerId}/timeframe-stats`);
+    return response.data;
+  },
+  
+  // Payment methods (admin)
+  listPaymentMethods: async () => {
+    const response = await api.get('/admin/payment-methods');
+    return response.data;
+  },
+  createPaymentMethod: async (payload: any) => {
+    const response = await api.post('/admin/payment-methods', payload);
+    return response.data;
+  },
+  updatePaymentMethod: async (id: string, payload: any) => {
+    const response = await api.put(`/admin/payment-methods/${id}`, payload);
+    return response.data;
+  },
+  deletePaymentMethod: async (id: string) => {
+    const response = await api.delete(`/admin/payment-methods/${id}`);
+    return response.data;
+  },
+
+  // Withdrawal methods (admin)
+  listWithdrawalMethods: async () => {
+    const response = await api.get('/admin/withdrawal-methods');
+    return response.data;
+  },
+  createWithdrawalMethod: async (payload: any) => {
+    const response = await api.post('/admin/withdrawal-methods', payload);
+    return response.data;
+  },
+  updateWithdrawalMethod: async (id: string, payload: any) => {
+    const response = await api.put(`/admin/withdrawal-methods/${id}`, payload);
+    return response.data;
+  },
+  deleteWithdrawalMethod: async (id: string) => {
+    const response = await api.delete(`/admin/withdrawal-methods/${id}`);
+    return response.data;
+  },
+
+  // Manual deposits (admin)
+  listManualDeposits: async (params: { page?: number; limit?: number; status?: string } = {}) => {
+    const response = await api.get('/admin/deposits', { params });
+    return response.data;
+  },
+  getManualDeposit: async (id: string) => {
+    const response = await api.get(`/admin/deposits/${id}`);
+    return response.data;
+  },
+  updateManualDepositStatus: async (id: string, status: 'pending'|'approved'|'rejected', admin_note?: string) => {
+    const response = await api.patch(`/admin/deposits/${id}/status`, { status, admin_note });
     return response.data;
   },
 
@@ -940,8 +1071,11 @@ export const adminApi = {
   },
 
   // Impersonation
-  impersonateUser: async (userId: string) => {
-    const response = await api.post(`/admin/impersonate/${userId}`);
+  impersonateUser: async (userId: string, opts?: { orders?: number; seed?: string }) => {
+    const payload: any = {};
+    if (opts?.orders != null) payload.orders = opts.orders;
+    if (opts?.seed) payload.seed = opts.seed;
+    const response = await api.post(`/admin/impersonate/${userId}`, payload);
     return response.data;
   },
 
@@ -961,22 +1095,27 @@ export const adminApi = {
     return response.data;
   },
 
-  saveSellerOverride: async (sellerId: string, metricName: string, overrideValue: number, originalValue?: number) => {
-    const response = await api.post(`/admin/seller/${sellerId}/overrides`, {
-      metricName,
-      overrideValue,
-      originalValue
+  getSellerOverridesSummary: async (sellerId: string) => {
+    const response = await api.get(`/admin/seller/${sellerId}/overrides/summary`);
+    return response.data;
+  },
+
+  saveSellerOverride: async (sellerId: string, payload: any) => {
+    const response = await api.post(`/admin/seller/${sellerId}/overrides`, payload);
+    return response.data;
+  },
+
+  resetSellerOverride: async (sellerId: string, metricName: string, period?: string) => {
+    const response = await api.delete(`/admin/seller/${sellerId}/overrides/${metricName}`, {
+      params: { period: period || 'total' }
     });
     return response.data;
   },
 
-  resetSellerOverride: async (sellerId: string, metricName: string) => {
-    const response = await api.delete(`/admin/seller/${sellerId}/overrides/${metricName}`);
-    return response.data;
-  },
-
-  clearSellerOverride: async (sellerId: string, metricName: string) => {
-    const response = await api.put(`/admin/seller/${sellerId}/overrides/${metricName}/clear`);
+  clearSellerOverride: async (sellerId: string, metricName: string, period?: string) => {
+    const response = await api.put(`/admin/seller/${sellerId}/overrides/${metricName}/clear`, {
+      period: period || 'total'
+    });
     return response.data;
   },
 
@@ -1033,20 +1172,14 @@ export const adminApi = {
   },
 
   createProduct: async (formData: FormData) => {
-    const response = await api.post('/admin/products', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
+    // Let the browser set the multipart boundary automatically
+    const response = await api.post('/admin/products', formData);
     return response.data;
   },
 
   updateProduct: async (id: string, formData: FormData) => {
-    const response = await api.put(`/admin/products/${id}`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
+    // Let the browser set the multipart boundary automatically
+    const response = await api.put(`/admin/products/${id}`, formData);
     return response.data;
   },
 
@@ -1149,6 +1282,100 @@ export const adminApi = {
 
   updateSystemSettings: async (settings: any) => {
     const response = await api.put('/admin/settings', settings);
+    return response.data;
+  },
+
+  // Payment Methods Management
+  getPaymentMethods: async () => {
+    const response = await api.get('/admin/payment-methods');
+    return response.data;
+  },
+
+  createPaymentMethod: async (paymentMethod: {
+    name: string;
+    type: 'deposit' | 'withdrawal' | 'both';
+    description?: string;
+    icon?: string;
+    processing_time?: string;
+    min_amount?: number;
+    max_amount?: number;
+    fees_percentage?: number;
+    fees_fixed?: number;
+    requires_verification?: boolean;
+    verification_fields?: any;
+    config?: any;
+  }) => {
+    const response = await api.post('/admin/payment-methods', paymentMethod);
+    return response.data;
+  },
+
+  updatePaymentMethod: async (id: string, paymentMethod: {
+    name?: string;
+    type?: 'deposit' | 'withdrawal' | 'both';
+    description?: string;
+    icon?: string;
+    processing_time?: string;
+    min_amount?: number;
+    max_amount?: number;
+    fees_percentage?: number;
+    fees_fixed?: number;
+    requires_verification?: boolean;
+    verification_fields?: any;
+    config?: any;
+    is_active?: boolean;
+  }) => {
+    const response = await api.put(`/admin/payment-methods/${id}`, paymentMethod);
+    return response.data;
+  },
+
+  deletePaymentMethod: async (id: string) => {
+    const response = await api.delete(`/admin/payment-methods/${id}`);
+    return response.data;
+  },
+
+  // Withdrawal Methods Management
+  getWithdrawalMethods: async () => {
+    const response = await api.get('/admin/withdrawal-methods');
+    return response.data;
+  },
+
+  createWithdrawalMethod: async (withdrawalMethod: {
+    name: string;
+    type: 'bank_transfer' | 'paypal' | 'stripe' | 'crypto' | 'check' | 'other';
+    description?: string;
+    icon?: string;
+    processing_time?: string;
+    min_amount?: number;
+    max_amount?: number;
+    fees_percentage?: number;
+    fees_fixed?: number;
+    requires_verification?: boolean;
+    verification_fields?: any;
+  }) => {
+    const response = await api.post('/admin/withdrawal-methods', withdrawalMethod);
+    return response.data;
+  },
+
+  updateWithdrawalMethod: async (id: string, withdrawalMethod: {
+    name?: string;
+    type?: 'bank_transfer' | 'paypal' | 'stripe' | 'crypto' | 'check' | 'other';
+    description?: string;
+    icon?: string;
+    processing_time?: string;
+    min_amount?: number;
+    max_amount?: number;
+    fees_percentage?: number;
+    fees_fixed?: number;
+    requires_verification?: boolean;
+    verification_fields?: any;
+    is_active?: boolean;
+  }) => {
+    const response = await api.put(`/admin/withdrawal-methods/${id}`, withdrawalMethod);
+    return response.data;
+  },
+
+  deleteWithdrawalMethod: async (id: string) => {
+    const response = await api.delete(`/admin/withdrawal-methods/${id}`);
     return response.data;
   },
 };

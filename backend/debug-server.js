@@ -128,7 +128,13 @@ console.log('46. URL encoded middleware set');
 app.use(general);
 console.log('47. General rate limiting set');
 
-app.use('/uploads', express.static('./uploads'));
+const path = require('path');
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  setHeaders: (res) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3000');
+  }
+}));
 console.log('48. Static files middleware set');
 
 app.get('/health', (req, res) => {

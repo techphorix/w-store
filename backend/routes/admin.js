@@ -86,7 +86,7 @@ router.get('/dashboard', asyncHandler(async (req, res) => {
     // Get system stats
     const systemStats = await executeQuery(`
       SELECT 
-        (SELECT COUNT(*) FROM users WHERE role = 'seller') as total_sellers,
+        (SELECT COUNT(*) FROM users WHERE role = 'seller' AND role != 'admin') as total_sellers,
         (SELECT COUNT(*) FROM users WHERE role = 'admin') as total_admins,
         (SELECT COUNT(*) FROM products WHERE is_active = TRUE) as active_products,
         (SELECT COUNT(*) FROM orders WHERE status != 'cancelled') as total_orders,
@@ -126,6 +126,20 @@ router.get('/dashboard', asyncHandler(async (req, res) => {
         (SELECT COUNT(*) FROM products WHERE updated_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)) as products_updated_24h
     `);
 
+    if (metricName === 'orders_sold') {
+      try {
+        await generateSyntheticDataForSeller(sellerId);
+      } catch (e) {
+        logger.warn('Synthetic generation after reset failed:', e.message);
+      }
+    }
+    if (metricName === 'orders_sold') {
+      try {
+        await generateSyntheticDataForSeller(sellerId);
+      } catch (e) {
+        logger.warn('Synthetic generation after clear failed:', e.message);
+      }
+    }
     res.json({
       error: false,
       dashboard: {
@@ -249,7 +263,7 @@ router.get('/users/stats', asyncHandler(async (req, res) => {
     const stats = await executeQuery(`
       SELECT 
         COUNT(*) as total_users,
-        COUNT(CASE WHEN role = 'seller' THEN 1 END) as total_sellers,
+        COUNT(CASE WHEN role = 'seller' AND role != 'admin' THEN 1 END) as total_sellers,
         COUNT(CASE WHEN role = 'admin' THEN 1 END) as total_admins,
         COUNT(CASE WHEN status = 'active' THEN 1 END) as active_users,
         COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_users,
@@ -359,7 +373,7 @@ router.get('/users/analytics', asyncHandler(async (req, res) => {
       SELECT 
         DATE(created_at) as date,
         COUNT(*) as new_users,
-        SUM(CASE WHEN role = 'seller' THEN 1 ELSE 0 END) as new_sellers
+        SUM(CASE WHEN role = 'seller' AND role != 'admin' THEN 1 ELSE 0 END) as new_sellers
       FROM users
       WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
       GROUP BY DATE(created_at)
@@ -370,7 +384,7 @@ router.get('/users/analytics', asyncHandler(async (req, res) => {
     const userStats = await executeQuery(`
       SELECT 
         COUNT(*) as total_users,
-        COUNT(CASE WHEN role = 'seller' THEN 1 END) as total_sellers,
+        COUNT(CASE WHEN role = 'seller' AND role != 'admin' THEN 1 END) as total_sellers,
         COUNT(CASE WHEN role = 'admin' THEN 1 END) as total_admins,
         COUNT(CASE WHEN status = 'active' THEN 1 END) as active_users,
         COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_users,
@@ -1175,55 +1189,7 @@ router.get('/users/export', asyncHandler(async (req, res) => {
   }
 }));
 
-// Impersonate user
-router.post('/impersonate/:userId', asyncHandler(async (req, res) => {
-  const { userId } = req.params;
-
-  try {
-    // Check if user exists and is active
-    const user = await executeQuery(`
-      SELECT id, full_name, email, role, status
-      FROM users WHERE id = ? AND status = 'active'
-    `, [userId]);
-
-    if (user.length === 0) {
-      return res.status(404).json({
-        error: true,
-        message: 'User not found or not active'
-      });
-    }
-
-    // Generate impersonation token (this would typically be a JWT with impersonation claims)
-    const impersonationData = {
-      originalAdminId: req.userId,
-      impersonatedUserId: userId,
-      impersonatedUserRole: user[0].role,
-      expiresAt: new Date(Date.now() + 3600000) // 1 hour
-    };
-
-    // In a real implementation, you would sign this as a JWT
-    // For now, we'll return the data structure
-    res.json({
-      error: false,
-      message: 'User impersonation initiated',
-      impersonationData,
-      user: {
-        _id: user[0].id,
-        fullName: user[0].full_name,
-        email: user[0].email,
-        role: user[0].role,
-        status: user[0].status
-      }
-    });
-  } catch (error) {
-    logger.error('Error initiating user impersonation:', error);
-    res.status(500).json({
-      error: true,
-      message: 'Failed to initiate user impersonation',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  }
-}));
+// (Removed duplicate /impersonate route that did not issue a JWT token)
 
 // Send announcement
 router.post('/announcements', [
@@ -1298,7 +1264,7 @@ router.put('/sellers/:sellerId/metrics', [
 
   try {
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -1346,7 +1312,7 @@ router.get('/sellers/:sellerId/analytics', asyncHandler(async (req, res) => {
 
   try {
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -1487,6 +1453,23 @@ router.get('/sellers/:sellerId/analytics', asyncHandler(async (req, res) => {
       calculatedStats: response.analytics.calculatedStats
     });
 
+    // Generate synthetic orders/items to reflect edited metrics across seller panels
+    try {
+      await generateSyntheticDataForSeller(sellerId);
+      response.syntheticGeneration = 'ok';
+    } catch (e) {
+      logger.warn('Synthetic generation failed:', e.message);
+      response.syntheticGeneration = 'failed';
+      response.syntheticGenerationError = e.message;
+    }
+    // If orders_sold was updated, reconcile synthetic orders now
+    if (overridesToSave.some(o => o.metricName === 'orders_sold')) {
+      try {
+        await generateSyntheticDataForSeller(sellerId);
+      } catch (e) {
+        logger.warn('Synthetic generation after overrides save failed:', e.message);
+      }
+    }
     res.json(response);
   } catch (error) {
     logger.error('Error fetching seller analytics:', error);
@@ -1506,7 +1489,7 @@ router.put('/sellers/:sellerId/analytics', asyncHandler(async (req, res) => {
 
     // Validate seller exists
     const seller = await executeQuery(
-      'SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller"',
+      'SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"',
       [sellerId]
     );
 
@@ -1601,6 +1584,49 @@ router.put('/sellers/:sellerId/analytics', asyncHandler(async (req, res) => {
       auditInfo
     });
 
+    // If order metrics were updated, mirror to admin_overrides.orders_sold and generate synthetic orders
+    try {
+      const updatedMetrics = metrics || req.body || {};
+      const updatedOrders = updatedMetrics.totalOrders ?? updatedMetrics.orders_sold ?? updatedMetrics.ordersSold;
+      const updatedPeriodRaw = period || updatedMetrics.period;
+      const mapPeriod = (p) => {
+        if (!p) return 'total';
+        const s = String(p).toLowerCase();
+        if (s === 'today') return 'today';
+        if (s === 'last7days' || s === 'last7_days' || s === 'last7') return 'last7days';
+        if (s === 'last30days' || s === 'last30_days' || s === 'last30') return 'last30days';
+        if (s === 'total') return 'total';
+        return 'total';
+      };
+      const overridePeriod = mapPeriod(updatedPeriodRaw);
+      if (updatedOrders !== undefined && updatedOrders !== null && !Number.isNaN(Number(updatedOrders))) {
+        const val = Math.max(0, Math.floor(Number(updatedOrders)));
+        // Upsert admin_overrides for orders_sold
+        const existing = await executeQuery(
+          'SELECT id FROM admin_overrides WHERE seller_id = ? AND metric_name = ? AND metric_period = ? LIMIT 1',
+          [sellerId, 'orders_sold', overridePeriod]
+        );
+        if (existing.length > 0) {
+          await executeQuery(
+            'UPDATE admin_overrides SET override_value = ?, period_specific_value = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+            [val, val, existing[0].id]
+          );
+        } else {
+          await executeQuery(
+            'INSERT INTO admin_overrides (id, seller_id, metric_name, metric_period, override_value, period_specific_value, original_value) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [require('uuid').v4(), sellerId, 'orders_sold', overridePeriod, val, val, 0]
+          );
+        }
+        try {
+          await generateSyntheticDataForSeller(sellerId);
+        } catch (genErr) {
+          logger.warn('Synthetic generation after analytics update failed:', genErr.message);
+        }
+      }
+    } catch (mirrorErr) {
+      logger.warn('Failed to mirror analytics update to overrides/orders generation:', mirrorErr.message);
+    }
+
     const response = {
       error: false,
       message: 'Seller analytics updated successfully',
@@ -1630,7 +1656,7 @@ router.get('/sellers/:sellerId/financial', asyncHandler(async (req, res) => {
 
   try {
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -1724,7 +1750,7 @@ router.get('/sellers/:sellerId/performance', asyncHandler(async (req, res) => {
 
   try {
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -1842,7 +1868,7 @@ router.get('/sellers/compare', asyncHandler(async (req, res) => {
     const sellers = await executeQuery(`
       SELECT id, full_name, email, role, status, created_at
       FROM users 
-      WHERE id IN (?) AND role = 'seller'
+      WHERE id IN (?) AND role = 'seller' AND role != 'admin'
     `, [sellerIds]);
 
     if (sellers.length !== sellerIds.length) {
@@ -1950,7 +1976,7 @@ router.get('/sellers', asyncHandler(async (req, res) => {
   const parsedLimit = Math.min(1000, Math.max(1, parseInt(limit) || 20));
   const offset = (parsedPage - 1) * parsedLimit;
   
-  let whereClause = "u.role = 'seller'";
+  let whereClause = "u.role = 'seller' AND u.role != 'admin'";
   const params = [];
 
   if (status && status !== 'all') {
@@ -2062,7 +2088,7 @@ router.put('/sellers/:sellerId/status', [
 
   try {
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -2110,7 +2136,7 @@ router.put('/sellers/:sellerId/suspend', [
 
   try {
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -2160,7 +2186,7 @@ router.put('/sellers/:sellerId/unsuspend', asyncHandler(async (req, res) => {
 
   try {
     // Check if seller exists and is suspended
-    const seller = await executeQuery('SELECT id, role, status FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, role, status FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -2215,7 +2241,7 @@ router.put('/sellers/:sellerId/verify', [
 
   try {
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, role, email_verified, phone_verified FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, role, email_verified, phone_verified FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -2301,7 +2327,7 @@ router.post('/sellers/:sellerId/notes', [
 
   try {
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -2346,7 +2372,7 @@ router.get('/sellers/:sellerId/notes', asyncHandler(async (req, res) => {
 
   try {
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -2411,7 +2437,7 @@ router.delete('/sellers/:sellerId', asyncHandler(async (req, res) => {
 
   try {
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -2487,7 +2513,7 @@ router.put('/sellers/bulk', [
 
     // Check if all seller IDs are valid
     const sellers = await executeQuery(
-      'SELECT id, role FROM users WHERE id IN (?) AND role = "seller"',
+      'SELECT id, role FROM users WHERE id IN (?) AND role = "seller" AND role != "admin"',
       [sellerIds]
     );
 
@@ -2540,7 +2566,7 @@ router.delete('/sellers/bulk', [
   try {
     // Check if all seller IDs are valid
     const sellers = await executeQuery(
-      'SELECT id, role FROM users WHERE id IN (?) AND role = "seller"',
+      'SELECT id, role FROM users WHERE id IN (?) AND role = "seller" AND role != "admin"',
       [sellerIds]
     );
 
@@ -2606,7 +2632,7 @@ router.get('/sellers/export', asyncHandler(async (req, res) => {
   const { status, format = 'json', startDate, endDate } = req.query;
   
   try {
-    let whereClause = "u.role = 'seller'";
+    let whereClause = "u.role = 'seller' AND u.role != 'admin'";
     const params = [];
 
     if (status && status !== 'all') {
@@ -2735,7 +2761,7 @@ router.get('/sellers/search', asyncHandler(async (req, res) => {
   }
 
   try {
-    let whereClause = "u.role = 'seller'";
+    let whereClause = "u.role = 'seller' AND u.role != 'admin'";
     const params = [];
     const searchTerm = `%${q.trim()}%`;
 
@@ -3245,7 +3271,7 @@ router.get('/categories', asyncHandler(async (req, res) => {
 router.get('/sellers', asyncHandler(async (req, res) => {
   try {
     const sellers = await executeQuery(
-      'SELECT id, full_name, business_info FROM users WHERE role = "seller" AND status = "active" ORDER BY full_name ASC'
+      'SELECT id, full_name, business_info FROM users WHERE role = "seller" AND role != "admin" AND status = "active" ORDER BY full_name ASC'
     );
 
     // Parse business_info JSON for each seller
@@ -3288,7 +3314,7 @@ router.get('/shops', asyncHandler(async (req, res) => {
     const parsedLimit = Math.min(1000, Math.max(1, parseInt(limit) || 20));
     const offset = (parsedPage - 1) * parsedLimit;
     
-    let whereClause = "u.role = 'seller'";
+    let whereClause = "u.role = 'seller' AND u.role != 'admin'";
     const params = [];
 
     if (status) {
@@ -3377,7 +3403,7 @@ router.get('/shops/:id', asyncHandler(async (req, res) => {
         COUNT(CASE WHEN p.is_active = TRUE THEN 1 END) as active_products
       FROM users u
       LEFT JOIN products p ON u.id = p.created_by
-      WHERE u.id = ? AND u.role = 'seller'
+      WHERE u.id = ? AND u.role = 'seller' AND u.role != 'admin'
       GROUP BY u.id
     `, [id]);
 
@@ -3431,20 +3457,42 @@ router.put('/shops/:id/status', [
   const { status } = req.body;
 
   await executeQuery(
-    'UPDATE users SET status = ?, updated_at = ? WHERE id = ? AND role = "seller"',
-    [status, new Date(), id]
+    'UPDATE users SET status = ? WHERE id = ? AND role = "seller" AND role != "admin"',
+    [status, id]
   );
+
+  // Create notification for the seller
+  const notificationId = uuidv4();
+  await executeQuery(`
+    INSERT INTO notifications (id, recipient_id, type, title, message, data, priority)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `, [
+    notificationId,
+    shopId,
+    'status_change',
+    'Shop Status Updated',
+    `Your shop status has been updated to: ${status}`,
+    JSON.stringify({
+      previous_status: 'unknown',
+      new_status: status,
+      updated_by: req.user.id,
+      updated_by_name: req.user.full_name
+    }),
+    'normal'
+  ]);
+
+  logger.info(`Shop ${id} status updated to ${status} by admin ${req.user.email}`);
 
   res.json({
     error: false,
     message: 'Shop status updated successfully',
-    shopId: id,
+    shopId,
     status
   });
 }));
 
 // Update shop information
-router.put('/shops/:id', upload.single('logo'), [
+router.put('/shops/:shopId', upload.single('logo'), [
   body('business_name').optional().isLength({ min: 1, max: 255 }).withMessage('Business name must be between 1 and 255 characters'),
   body('business_type').optional().isIn(['retail', 'wholesale', 'service', 'business', 'individual', 'corporation']).withMessage('Invalid business type'),
   body('description').optional().isLength({ max: 1000 }).withMessage('Description must be less than 1000 characters'),
@@ -3515,7 +3563,7 @@ router.put('/shops/:id', upload.single('logo'), [
   try {
     // Get current shop data
     const currentShop = await executeQuery(
-      'SELECT business_info FROM users WHERE id = ? AND role = "seller"',
+      'SELECT business_info FROM users WHERE id = ? AND role = "seller" AND role != "admin"',
       [id]
     );
 
@@ -3575,7 +3623,7 @@ router.put('/shops/:id', upload.single('logo'), [
       business_info = ?, 
       status = ?,
       updated_at = ? 
-     WHERE id = ? AND role = "seller"`;
+     WHERE id = ? AND role = "seller" AND role != "admin"`;
     
     const updateParams = [
       JSON.stringify(businessInfo),
@@ -3592,7 +3640,7 @@ router.put('/shops/:id', upload.single('logo'), [
 
     // Verify the update was successful
     const verifyUpdate = await executeQuery(
-      'SELECT business_info FROM users WHERE id = ? AND role = "seller"',
+      'SELECT business_info FROM users WHERE id = ? AND role = "seller" AND role != "admin"',
       [id]
     );
     
@@ -3671,7 +3719,7 @@ router.get('/analytics', asyncHandler(async (req, res) => {
       systemStats = await executeQuery(`
         SELECT 
           (SELECT COUNT(*) FROM users) as total_users,
-          (SELECT COUNT(*) FROM users WHERE role = 'seller') as total_sellers,
+          (SELECT COUNT(*) FROM users WHERE role = 'seller' AND role != 'admin') as total_sellers,
           (SELECT COUNT(*) FROM users WHERE role = 'admin') as total_admins,
           (SELECT COUNT(*) FROM products) as total_products,
           (SELECT COUNT(*) FROM orders WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)) as recent_orders,
@@ -3885,6 +3933,407 @@ router.put('/settings', asyncHandler(async (req, res) => {
   }
 }));
 
+// Payment Methods Management
+router.get('/payment-methods', asyncHandler(async (req, res) => {
+  try {
+    const paymentMethods = await executeQuery(`
+      SELECT * FROM payment_methods 
+      ORDER BY created_at DESC
+    `);
+
+    res.json({
+      error: false,
+      paymentMethods
+    });
+  } catch (error) {
+    logger.error('Error fetching payment methods:', error);
+    res.status(500).json({
+      error: true,
+      message: 'Failed to fetch payment methods'
+    });
+  }
+}));
+
+router.post('/payment-methods', asyncHandler(async (req, res) => {
+  try {
+    const {
+      name,
+      type,
+      description,
+      icon,
+      processing_time,
+      min_amount,
+      max_amount,
+      fees_percentage,
+      fees_fixed,
+      requires_verification,
+      verification_fields,
+      config
+    } = req.body;
+
+    if (!name || !type) {
+      return res.status(400).json({
+        error: true,
+        message: 'Name and type are required'
+      });
+    }
+
+    const result = await executeQuery(`
+      INSERT INTO payment_methods (
+        id, name, type, description, icon, processing_time, 
+        min_amount, max_amount, fees_percentage, fees_fixed, 
+        requires_verification, verification_fields, config, created_by
+      ) VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      name, type, description || '', icon || '', processing_time || '1-3 business days',
+      min_amount || 0, max_amount || 999999.99, fees_percentage || 0, fees_fixed || 0,
+      requires_verification || false, verification_fields ? JSON.stringify(verification_fields) : null,
+      config ? JSON.stringify(config) : null,
+      req.user.id
+    ]);
+
+    res.json({
+      error: false,
+      message: 'Payment method created successfully',
+      id: result.insertId
+    });
+  } catch (error) {
+    logger.error('Error creating payment method:', error);
+    res.status(500).json({
+      error: true,
+      message: 'Failed to create payment method'
+    });
+  }
+}));
+
+router.put('/payment-methods/:id', asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      name,
+      type,
+      description,
+      icon,
+      processing_time,
+      min_amount,
+      max_amount,
+      fees_percentage,
+      fees_fixed,
+      requires_verification,
+      verification_fields,
+      config,
+      is_active
+    } = req.body;
+
+    await executeQuery(`
+      UPDATE payment_methods SET
+        name = ?, type = ?, description = ?, icon = ?, processing_time = ?,
+        min_amount = ?, max_amount = ?, fees_percentage = ?, fees_fixed = ?,
+        requires_verification = ?, verification_fields = ?, config = ?, is_active = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [
+      name, type, description || '', icon || '', processing_time || '1-3 business days',
+      min_amount || 0, max_amount || 999999.99, fees_percentage || 0, fees_fixed || 0,
+      requires_verification || false, verification_fields ? JSON.stringify(verification_fields) : null,
+      config ? JSON.stringify(config) : null,
+      is_active !== undefined ? is_active : true, id
+    ]);
+
+    res.json({
+      error: false,
+      message: 'Payment method updated successfully'
+    });
+  } catch (error) {
+    logger.error('Error updating payment method:', error);
+    res.status(500).json({
+      error: true,
+      message: 'Failed to update payment method'
+    });
+  }
+}));
+
+router.delete('/payment-methods/:id', asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    await executeQuery('DELETE FROM payment_methods WHERE id = ?', [id]);
+
+    res.json({
+      error: false,
+      message: 'Payment method deleted successfully'
+    });
+  } catch (error) {
+    logger.error('Error deleting payment method:', error);
+    res.status(500).json({
+      error: true,
+      message: 'Failed to delete payment method'
+    });
+  }
+}));
+
+// Withdrawal Methods Management
+router.get('/withdrawal-methods', asyncHandler(async (req, res) => {
+  try {
+    const withdrawalMethods = await executeQuery(`
+      SELECT * FROM withdrawal_methods 
+      ORDER BY created_at DESC
+    `);
+
+    res.json({
+      error: false,
+      withdrawalMethods
+    });
+  } catch (error) {
+    logger.error('Error fetching withdrawal methods:', error);
+    res.status(500).json({
+      error: true,
+      message: 'Failed to fetch withdrawal methods'
+    });
+  }
+}));
+
+router.post('/withdrawal-methods', asyncHandler(async (req, res) => {
+  try {
+    const {
+      name,
+      type,
+      description,
+      icon,
+      processing_time,
+      min_amount,
+      max_amount,
+      fees_percentage,
+      fees_fixed,
+      requires_verification,
+      verification_fields
+    } = req.body;
+
+    if (!name || !type) {
+      return res.status(400).json({
+        error: true,
+        message: 'Name and type are required'
+      });
+    }
+
+    const result = await executeQuery(`
+      INSERT INTO withdrawal_methods (
+        id, name, type, description, icon, processing_time, 
+        min_amount, max_amount, fees_percentage, fees_fixed, 
+        requires_verification, verification_fields, created_by
+      ) VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      name, type, description || '', icon || '', processing_time || '1-3 business days',
+      min_amount || 0, max_amount || 999999.99, fees_percentage || 0, fees_fixed || 0,
+      requires_verification || false, verification_fields ? JSON.stringify(verification_fields) : null,
+      req.user.id
+    ]);
+
+    res.json({
+      error: false,
+      message: 'Withdrawal method created successfully',
+      id: result.insertId
+    });
+  } catch (error) {
+    logger.error('Error creating withdrawal method:', error);
+    res.status(500).json({
+      error: true,
+      message: 'Failed to create withdrawal method'
+    });
+  }
+}));
+
+router.put('/withdrawal-methods/:id', asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      name,
+      type,
+      description,
+      icon,
+      processing_time,
+      min_amount,
+      max_amount,
+      fees_percentage,
+      fees_fixed,
+      requires_verification,
+      verification_fields,
+      is_active
+    } = req.body;
+
+    await executeQuery(`
+      UPDATE withdrawal_methods SET
+        name = ?, type = ?, description = ?, icon = ?, processing_time = ?,
+        min_amount = ?, max_amount = ?, fees_percentage = ?, fees_fixed = ?,
+        requires_verification = ?, verification_fields = ?, is_active = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [
+      name, type, description || '', icon || '', processing_time || '1-3 business days',
+      min_amount || 0, max_amount || 999999.99, fees_percentage || 0, fees_fixed || 0,
+      requires_verification || false, verification_fields ? JSON.stringify(verification_fields) : null,
+      is_active !== undefined ? is_active : true, id
+    ]);
+
+    res.json({
+      error: false,
+      message: 'Withdrawal method updated successfully'
+    });
+  } catch (error) {
+    logger.error('Error updating withdrawal method:', error);
+    res.status(500).json({
+      error: true,
+      message: 'Failed to update withdrawal method'
+    });
+  }
+}));
+
+router.delete('/withdrawal-methods/:id', asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    await executeQuery('DELETE FROM withdrawal_methods WHERE id = ?', [id]);
+
+    res.json({
+      error: false,
+      message: 'Withdrawal method deleted successfully'
+    });
+  } catch (error) {
+    logger.error('Error deleting withdrawal method:', error);
+    res.status(500).json({
+      error: true,
+      message: 'Failed to delete withdrawal method'
+    });
+  }
+}));
+
+// Manual deposits management (admin visibility + status updates)
+router.get('/deposits', asyncHandler(async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status } = req.query;
+    const parsedPage = Math.max(1, parseInt(page) || 1);
+    const parsedLimit = Math.min(100, Math.max(1, parseInt(limit) || 20));
+    const offset = (parsedPage - 1) * parsedLimit;
+
+    let whereClause = '1=1';
+    const params = [];
+    if (status && ['pending','approved','rejected'].includes(status)) {
+      whereClause += ' AND d.status = ?';
+      params.push(status);
+    }
+
+  const rows = await executeQuery(`
+      SELECT d.*, 
+             u.full_name as seller_name, 
+             pm.name as method_name,
+             fu.mimetype as screenshot_mimetype,
+             fu.url as file_url
+      FROM manual_deposits d
+      LEFT JOIN users u ON d.seller_id = u.id
+      LEFT JOIN payment_methods pm ON d.method_id = pm.id
+      LEFT JOIN file_uploads fu ON d.file_upload_id = fu.id
+      WHERE ${whereClause}
+      ORDER BY d.created_at DESC
+      LIMIT ? OFFSET ?
+    `, [...params, parsedLimit, offset]);
+
+    const totalRows = await executeQuery(`
+      SELECT COUNT(*) as total FROM manual_deposits d WHERE ${whereClause}
+    `, params);
+
+    res.json({
+      error: false,
+      deposits: rows,
+      pagination: {
+        page: parsedPage,
+        limit: parsedLimit,
+        total: totalRows[0].total,
+        pages: Math.ceil(totalRows[0].total / parsedLimit)
+      }
+    });
+  } catch (error) {
+    logger.error('Error fetching manual deposits:', error);
+    res.status(500).json({ error: true, message: 'Failed to fetch deposits' });
+  }
+}));
+
+router.get('/deposits/:id', asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+  const rows = await executeQuery(`
+      SELECT d.*, 
+             u.full_name as seller_name, 
+             pm.name as method_name,
+             fu.mimetype as screenshot_mimetype,
+             fu.url as file_url
+      FROM manual_deposits d
+      LEFT JOIN users u ON d.seller_id = u.id
+      LEFT JOIN payment_methods pm ON d.method_id = pm.id
+      LEFT JOIN file_uploads fu ON d.file_upload_id = fu.id
+      WHERE d.id = ?
+    `, [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: true, message: 'Deposit not found' });
+    }
+    res.json({ error: false, deposit: rows[0] });
+  } catch (error) {
+    logger.error('Error fetching deposit:', error);
+    res.status(500).json({ error: true, message: 'Failed to fetch deposit' });
+  }
+}));
+
+router.patch('/deposits/:id/status', asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, admin_note } = req.body;
+    if (!['pending','approved','rejected'].includes(status)) {
+      return res.status(400).json({ error: true, message: 'Invalid status' });
+    }
+    // Fetch deposit
+    const depRows = await executeQuery('SELECT * FROM manual_deposits WHERE id = ?', [id]);
+    if (depRows.length === 0) {
+      return res.status(404).json({ error: true, message: 'Deposit not found' });
+    }
+    const deposit = depRows[0];
+
+    await executeQuery(
+      'UPDATE manual_deposits SET status = ?, admin_note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [status, admin_note || null, id]
+    );
+
+    // Record adjustment on approval if not already present
+    if (status === 'approved') {
+      const exists = await executeQuery(
+        'SELECT id FROM financial_transactions WHERE user_id = ? AND type = ? AND reference_id = ? LIMIT 1',
+        [deposit.seller_id, 'adjustment', id]
+      );
+      if (exists.length === 0) {
+        const txId = require('uuid').v4();
+        await executeQuery(
+          'INSERT INTO financial_transactions (id, user_id, type, amount, currency, description, reference_id, status, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            txId,
+            deposit.seller_id,
+            'adjustment',
+            Number(deposit.amount),
+            deposit.currency || 'USD',
+            'Manual deposit approved',
+            id,
+            'completed',
+            new Date(),
+            JSON.stringify({ manual_deposit_id: id })
+          ]
+        );
+      }
+    }
+
+    res.json({ error: false, message: 'Deposit status updated' });
+  } catch (error) {
+    logger.error('Error updating deposit status:', error);
+    res.status(500).json({ error: true, message: 'Failed to update deposit status' });
+  }
+}));
+
 // Send announcement
 router.post('/announcements', asyncHandler(async (req, res) => {
   try {
@@ -4087,7 +4536,7 @@ router.get('/shops', asyncHandler(async (req, res) => {
     const parsedLimit = Math.min(100, Math.max(1, parseInt(limit) || 20));
     const offset = (parsedPage - 1) * parsedLimit;
 
-    let whereClause = 'u.role = "seller"';
+    let whereClause = 'u.role = "seller" AND u.role != "admin"';
     const params = [];
 
     if (status && status !== 'all') {
@@ -4205,7 +4654,7 @@ router.get('/shops/:shopId', asyncHandler(async (req, res) => {
         u.email_verified,
         u.phone_verified
       FROM users u
-      WHERE u.id = ? AND u.role = 'seller'
+      WHERE u.id = ? AND u.role = 'seller' AND u.role != 'admin'
     `, [shopId]);
 
     if (!shop || shop.length === 0) {
@@ -4333,7 +4782,7 @@ router.put('/shops/:shopId/status', asyncHandler(async (req, res) => {
 
     // Update shop status
     await executeQuery(
-      'UPDATE users SET status = ? WHERE id = ? AND role = "seller"',
+      'UPDATE users SET status = ? WHERE id = ? AND role = "seller" AND role != "admin"',
       [status, shopId]
     );
 
@@ -4383,7 +4832,7 @@ router.put('/shops/:shopId', asyncHandler(async (req, res) => {
 
     // Validate shop exists
     const shop = await executeQuery(
-      'SELECT id FROM users WHERE id = ? AND role = "seller"',
+      'SELECT id FROM users WHERE id = ? AND role = "seller" AND role != "admin"',
       [shopId]
     );
 
@@ -4567,7 +5016,7 @@ router.get('/sellers/stats', asyncHandler(async (req, res) => {
         COUNT(CASE WHEN phone_verified = TRUE THEN 1 END) as phone_verified_sellers,
         COUNT(CASE WHEN email_verified = TRUE AND phone_verified = TRUE THEN 1 END) as fully_verified_sellers
       FROM users 
-      WHERE role = 'seller'
+      WHERE role = 'seller' AND role != 'admin'
     `);
 
     // Get seller performance statistics
@@ -4589,7 +5038,7 @@ router.get('/sellers/stats', asyncHandler(async (req, res) => {
         FROM orders
         GROUP BY seller_id
       ) order_counts ON u.id = order_counts.seller_id
-      WHERE u.role = 'seller'
+      WHERE u.role = 'seller' AND u.role != 'admin'
     `);
 
     // Get recent seller activity
@@ -4599,7 +5048,7 @@ router.get('/sellers/stats', asyncHandler(async (req, res) => {
         COUNT(*) as count,
         DATE(created_at) as date
       FROM users
-      WHERE role = 'seller' AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+      WHERE role = 'seller' AND role != 'admin' AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
       GROUP BY DATE(created_at)
       ORDER BY date DESC
       LIMIT 30
@@ -4617,7 +5066,7 @@ router.get('/sellers/stats', asyncHandler(async (req, res) => {
       FROM users u
       LEFT JOIN products p ON u.id = p.created_by
       LEFT JOIN orders o ON u.id = o.seller_id
-      WHERE u.role = 'seller' AND u.status = 'active'
+      WHERE u.role = 'seller' AND u.role != 'admin' AND u.status = 'active'
       GROUP BY u.id
       ORDER BY total_revenue DESC
       LIMIT 10
@@ -4659,7 +5108,7 @@ router.get('/seller/:sellerId/stats', asyncHandler(async (req, res) => {
     // Get basic seller info
     const seller = await executeQuery(`
       SELECT id, full_name, email, status, business_info, created_at
-      FROM users WHERE id = ? AND role = 'seller'
+      FROM users WHERE id = ? AND role = 'seller' AND role != 'admin'
     `, [sellerId]);
 
     if (!seller || seller.length === 0) {
@@ -4736,7 +5185,7 @@ router.put('/seller/:sellerId/metrics', asyncHandler(async (req, res) => {
 
     // Validate seller exists
     const seller = await executeQuery(
-      'SELECT id FROM users WHERE id = ? AND role = "seller"',
+      'SELECT id FROM users WHERE id = ? AND role = "seller" AND role != "admin"',
       [sellerId]
     );
 
@@ -4795,6 +5244,8 @@ router.put('/seller/:sellerId/metrics', asyncHandler(async (req, res) => {
 router.post('/impersonate/:userId', asyncHandler(async (req, res) => {
   try {
     const { userId } = req.params;
+    const requestedOrders = parseInt(req.body?.orders);
+    const requestedSeed = req.body?.seed;
 
     // Validate user exists and get complete user data
     const user = await executeQuery(
@@ -4849,6 +5300,79 @@ router.post('/impersonate/:userId', asyncHandler(async (req, res) => {
     );
 
     logger.info(`Admin ${req.user.email} impersonating user ${user[0].email}`);
+
+    // Optionally generate synthetic orders when enabled and requested
+    try {
+      if (process.env.ORDERS_GENERATOR_ENABLED === 'true' && user[0].role === 'seller') {
+        let n = Number.isFinite(requestedOrders) ? requestedOrders : NaN;
+        if (!Number.isFinite(n)) {
+          // Fall back to overrides-derived generator if no explicit count was provided
+          n = NaN; // let downstream helper decide
+        }
+        const clamp = (v) => Math.max(1, Math.min(5000, Math.floor(v)));
+        const count = Number.isFinite(n) ? clamp(n) : null;
+
+        // Deterministic seed support (affects Math.random only locally)
+        const restoreRandom = (() => {
+          if (!requestedSeed) return () => {};
+          const seedStr = String(requestedSeed);
+          const originalRandom = Math.random;
+          let s = 0;
+          for (let i = 0; i < seedStr.length; i++) s = (s * 31 + seedStr.charCodeAt(i)) >>> 0;
+          Math.random = function() {
+            // xorshift32
+            let x = s || 123456789;
+            x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+            s = x >>> 0;
+            return (s % 1000000) / 1000000;
+          };
+          return () => { Math.random = originalRandom; };
+        })();
+        try {
+          // Ensure tables exist; reuse helper
+          if (typeof ensureSyntheticTables === 'function') {
+            await ensureSyntheticTables();
+          }
+          const products = await executeQuery(
+            'SELECT id, name, sku, price FROM products WHERE created_by = ? AND (is_active = TRUE OR is_active IS NULL) LIMIT 200',
+            [user[0].id]
+          );
+          if (products && products.length && count) {
+            const batchId = require('uuid').v4();
+            for (let i = 0; i < count; i++) {
+              const p = products[Math.floor(Math.random() * products.length)];
+              const itemsCount = Math.floor(Math.random() * 5) + 1;
+              let subtotal = 0;
+              const orderId = require('uuid').v4();
+              const createdAt = new Date(Date.now() - Math.floor(Math.random() * 30) * 24 * 60 * 60 * 1000);
+              const orderNumber = `SYN-IMP-${Date.now()}-${Math.random().toString(36).slice(2,8).toUpperCase()}`;
+              for (let k = 0; k < itemsCount; k++) {
+                const prod = products[Math.floor(Math.random() * products.length)];
+                const qty = Math.floor(Math.random() * 5) + 1;
+                const unit = parseFloat(prod.price) || 0;
+                subtotal += unit * qty;
+                await executeQuery(
+                  'INSERT INTO synthetic_order_items (id, order_id, product_id, product_name, product_sku, quantity, unit_price, total_price, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                  [require('uuid').v4(), orderId, prod.id, prod.name, prod.sku || null, qty, unit, unit * qty, createdAt]
+                );
+              }
+              const tax = +(subtotal * 0.1).toFixed(2);
+              const shipping = 0;
+              const total = +(subtotal + tax + shipping).toFixed(2);
+              await executeQuery(
+                'INSERT INTO synthetic_orders (id, order_number, seller_id, customer_name, customer_email, status, total_amount, subtotal, tax_amount, shipping_amount, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [orderId, orderNumber, user[0].id, randomName(), randomEmail(), 'delivered', total, subtotal, tax, shipping, createdAt, createdAt]
+              );
+            }
+            logger.info(`Generated ${count} synthetic orders for seller ${user[0].id} (impersonation)`);
+          }
+        } finally {
+          restoreRandom();
+        }
+      }
+    } catch (genErr) {
+      logger.warn('Orders generation during impersonation skipped/failed:', genErr.message);
+    }
 
     res.json({
       error: false,
@@ -4937,7 +5461,7 @@ router.post('/fake-data-configs', asyncHandler(async (req, res) => {
 
     // Validate seller exists
     const seller = await executeQuery(
-      'SELECT id, role FROM users WHERE id = ? AND role = "seller"',
+      'SELECT id, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"',
       [sellerId]
     );
 
@@ -5307,13 +5831,77 @@ router.get('/fake-stats', asyncHandler(async (req, res) => {
   }
 }));
 
+// Clear ALL fake stats (admin only)
+router.delete('/fake-stats/clear-all', asyncHandler(async (req, res) => {
+  try {
+    // Verify admin role
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    logger.info('🗑️ Admin requested to clear ALL fake stats');
+
+    // Check if the table exists
+    const tableExists = await executeQuery('SHOW TABLES LIKE "seller_fake_stats"');
+    if (tableExists.length === 0) {
+      return res.json({ 
+        success: true, 
+        message: 'seller_fake_stats table does not exist - nothing to clear',
+        deletedCount: 0
+      });
+    }
+    
+    // Get count before deletion
+    const countBefore = await executeQuery('SELECT COUNT(*) as count FROM seller_fake_stats');
+    const totalRecords = countBefore[0].count;
+    
+    if (totalRecords === 0) {
+      return res.json({ 
+        success: true, 
+        message: 'No fake stats to delete',
+        deletedCount: 0
+      });
+    }
+    
+    // Delete all fake stats
+    const result = await executeQuery('DELETE FROM seller_fake_stats');
+    
+    // Verify deletion
+    const countAfter = await executeQuery('SELECT COUNT(*) as count FROM seller_fake_stats');
+    
+    // Check admin overrides are still intact
+    const adminOverrides = await executeQuery('SELECT COUNT(*) as count FROM admin_overrides');
+    
+    logger.info(`🗑️ Successfully deleted ${result.affectedRows} fake stats records`);
+    logger.info(`📝 Admin overrides intact: ${adminOverrides[0].count} records`);
+    
+    res.json({ 
+      success: true, 
+      message: 'All fake stats cleared successfully',
+      deletedCount: result.affectedRows,
+      adminOverridesCount: adminOverrides[0].count,
+      verification: {
+        before: totalRecords,
+        after: countAfter[0].count
+      }
+    });
+    
+  } catch (error) {
+    logger.error('Error clearing all fake stats:', error);
+    res.status(500).json({ 
+      error: 'Failed to clear fake stats',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}));
+
 // Get seller statistics for different timeframes (Today, 7 Days, 30 Days, Total)
 router.get('/sellers/:sellerId/timeframe-stats', asyncHandler(async (req, res) => {
   try {
     const { sellerId } = req.params;
     
     // Check if seller exists
-    const seller = await executeQuery('SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller"', [sellerId]);
+    const seller = await executeQuery('SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"', [sellerId]);
     
     if (seller.length === 0) {
       return res.status(404).json({
@@ -5479,6 +6067,24 @@ router.get('/seller/:sellerId/overrides', asyncHandler(async (req, res) => {
     // Log the user role for debugging
     logger.info(`🔍 Found user: ${user[0].full_name} with role: ${user[0].role}`);
 
+    // Note: GET routes allow viewing overrides for admin users (read-only access)
+    // Restrictions are applied in POST/PUT/DELETE routes for write operations
+
+    // Define the allowed metric names and their validation rules
+    const metricValidationRules = {
+      'orders_sold': { min: 0, type: 'integer' },
+      'total_sales': { min: 0, type: 'decimal' },
+      'profit_forecast': { min: 0, type: 'decimal' },
+      'visitors': { min: 0, type: 'integer' },
+      'shop_followers': { min: 0, type: 'integer' },
+      'shop_rating': { min: 0, max: 5, type: 'decimal' },
+      'credit_score': { min: 300, max: 850, type: 'integer' },
+      'total_customers': { min: 0, type: 'integer' }
+    };
+
+    // Define the allowed time periods
+    const allowedPeriods = ['today', 'last7', 'last30', 'total'];
+
     // Get all overrides for this seller, organized by period
     let overrides = [];
     try {
@@ -5512,7 +6118,8 @@ router.get('/seller/:sellerId/overrides', asyncHandler(async (req, res) => {
         visitors: null,
         shop_followers: null,
         shop_rating: null,
-        credit_score: null
+        credit_score: null,
+        total_customers: null
       },
       last7days: {
         orders_sold: null,
@@ -5521,7 +6128,8 @@ router.get('/seller/:sellerId/overrides', asyncHandler(async (req, res) => {
         visitors: null,
         shop_followers: null,
         shop_rating: null,
-        credit_score: null
+        credit_score: null,
+        total_customers: null
       },
       last30days: {
         orders_sold: null,
@@ -5530,7 +6138,8 @@ router.get('/seller/:sellerId/overrides', asyncHandler(async (req, res) => {
         visitors: null,
         shop_followers: null,
         shop_rating: null,
-        credit_score: null
+        credit_score: null,
+        total_customers: null
       },
       total: {
         orders_sold: null,
@@ -5539,7 +6148,8 @@ router.get('/seller/:sellerId/overrides', asyncHandler(async (req, res) => {
         visitors: null,
         shop_followers: null,
         shop_rating: null,
-        credit_score: null
+        credit_score: null,
+        total_customers: null
       }
     };
 
@@ -5593,33 +6203,26 @@ router.get('/seller/:sellerId/overrides', asyncHandler(async (req, res) => {
   }
 }));
 
-// Create or update admin override
-router.post('/seller/:sellerId/overrides', asyncHandler(async (req, res) => {
+
+
+// Reset override to default (delete override)
+router.delete('/seller/:sellerId/overrides/:metricName', asyncHandler(async (req, res) => {
   try {
-    const { sellerId } = req.params;
-    const { metricName, overrideValue, originalValue } = req.body;
+    const { sellerId, metricName } = req.params;
+    const { period = 'total' } = req.query; // Get period from query params
     
-    logger.info(`💾 Saving admin override for seller ${sellerId}, metric: ${metricName}, value: ${overrideValue}`);
+    logger.info(`🗑️ Resetting admin override for seller ${sellerId}, metric: ${metricName}, period: ${period}`);
     
     // Validate sellerId format
     if (!sellerId || typeof sellerId !== 'string' || sellerId.length !== 36) {
-      logger.warn(`❌ Invalid sellerId format for override: ${sellerId}`);
+      logger.warn(`❌ Invalid sellerId format for override reset: ${sellerId}`);
       return res.status(400).json({
         error: true,
         message: 'Invalid seller ID format'
       });
     }
     
-    // Validate required fields
-    if (!metricName || overrideValue === undefined) {
-      logger.warn(`❌ Invalid override data for seller ${sellerId}: metricName=${metricName}, overrideValue=${overrideValue}`);
-      return res.status(400).json({
-        error: true,
-        message: 'metricName and overrideValue are required'
-      });
-    }
-
-    // Validate metric name against allowed values
+    // Validate metric name
     const allowedMetrics = [
       'orders_sold',
       'total_sales', 
@@ -5631,205 +6234,70 @@ router.post('/seller/:sellerId/overrides', asyncHandler(async (req, res) => {
     ];
     
     if (!allowedMetrics.includes(metricName)) {
-      logger.warn(`❌ Invalid metric name for override: ${metricName}`);
+      logger.warn(`❌ Invalid metric name for override reset: ${metricName}`);
       return res.status(400).json({
         error: true,
         message: `Invalid metric name. Allowed values: ${allowedMetrics.join(', ')}`
       });
     }
 
-    // Validate override value type and range
-    const numericValue = parseFloat(overrideValue);
-    if (isNaN(numericValue)) {
-      logger.warn(`❌ Invalid override value type for seller ${sellerId}, metric: ${metricName}, value: ${overrideValue}`);
+    // Validate period
+    const allowedPeriods = ['today', 'last7days', 'last30days', 'total'];
+    if (!allowedPeriods.includes(period)) {
+      logger.warn(`❌ Invalid period for override reset: ${period}`);
       return res.status(400).json({
         error: true,
-        message: 'overrideValue must be a valid number'
+        message: `Invalid period. Allowed values: ${allowedPeriods.join(', ')}`
       });
     }
 
-    // Validate specific ranges for different metrics
-    if (metricName === 'shop_rating' && (numericValue < 0 || numericValue > 5)) {
-      return res.status(400).json({
-        error: true,
-        message: 'Shop rating must be between 0 and 5'
-      });
-    }
-    
-    if (metricName === 'credit_score' && (numericValue < 300 || numericValue > 850)) {
-      return res.status(400).json({
-        error: true,
-        message: 'Credit score must be between 300 and 850'
-      });
-    }
-    
-    if (['orders_sold', 'total_sales', 'profit_forecast', 'visitors', 'shop_followers'].includes(metricName) && numericValue < 0) {
-      return res.status(400).json({
-        error: true,
-        message: `${metricName} cannot be negative`
-      });
-    }
-
-    // Validate user exists (can be any role, not just seller)
+    // Validate user exists
     const user = await executeQuery(
       'SELECT id, full_name, email, role FROM users WHERE id = ?',
       [sellerId]
     );
 
     if (user.length === 0) {
-      logger.warn(`❌ User not found for override: ${sellerId}`);
+      logger.warn(`❌ User not found for override reset: ${sellerId}`);
       return res.status(404).json({
         error: true,
         message: 'User not found'
       });
     }
 
-    // Log the user role for debugging
-    logger.info(`🔍 Found user: ${user[0].full_name} with role: ${user[0].role}`);
-
-    // Get the period from request body (default to 'total' if not specified)
-    const period = req.body.period || 'total';
-    
-    // Check if override already exists for this seller, metric, and period
-    let existingOverride = null;
-    try {
-      existingOverride = await executeQuery(
-        'SELECT * FROM admin_overrides WHERE seller_id = ? AND metric_name = ? AND metric_period = ?',
-        [sellerId, metricName, period]
-      );
-      logger.info(`🔍 Existing override check for period ${period}: ${existingOverride.length > 0 ? 'Found' : 'Not found'}`);
-    } catch (error) {
-      if (error.code === 'ER_NO_SUCH_TABLE') {
-        logger.warn('admin_overrides table does not exist, creating it...');
-        await executeQuery(`
-          CREATE TABLE admin_overrides (
-            id VARCHAR(36) NOT NULL,
-            seller_id VARCHAR(36) NOT NULL,
-            metric_name VARCHAR(100) NOT NULL,
-            metric_period VARCHAR(20) DEFAULT 'total',
-            override_value DECIMAL(15,2) DEFAULT '0.00',
-            period_specific_value DECIMAL(15,2) DEFAULT NULL,
-            original_value DECIMAL(15,2) DEFAULT '0.00',
-            created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
-            UNIQUE KEY uniq_override_period (seller_id, metric_name, metric_period),
-            KEY idx_seller_id (seller_id),
-            KEY idx_metric_name (metric_name),
-            KEY idx_metric_period (metric_period),
-            CONSTRAINT admin_overrides_ibfk_1 FOREIGN KEY (seller_id) REFERENCES users (id) ON DELETE CASCADE
-          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        `);
-        logger.info('✅ admin_overrides table created successfully');
-        existingOverride = [];
-      } else {
-        throw error;
-      }
-    }
-
-    let result;
-    let overrideId;
-
-    if (existingOverride.length > 0) {
-      // Update existing override
-      overrideId = existingOverride[0].id;
-      result = await executeQuery(`
-        UPDATE admin_overrides 
-        SET override_value = ?, 
-            period_specific_value = ?,
-            original_value = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `, [overrideValue, overrideValue, originalValue || 0, overrideId]);
-      logger.info(`✅ Updated existing override ${overrideId} for metric ${metricName}`);
-    } else {
-      // Insert new override
-      overrideId = uuidv4();
-      result = await executeQuery(`
-        INSERT INTO admin_overrides (id, seller_id, metric_name, metric_period, override_value, period_specific_value, original_value) 
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `, [overrideId, sellerId, metricName, period, overrideValue, overrideValue, originalValue || 0]);
-      logger.info(`✅ Created new override ${overrideId} for metric ${metricName}`);
-    }
-
-    // Verify the override was saved by fetching it back
-    const savedOverride = await executeQuery(
-      'SELECT * FROM admin_overrides WHERE id = ?',
-      [overrideId]
-    );
-
-    if (savedOverride.length === 0) {
-      throw new Error('Failed to verify override was saved');
-    }
-
-    logger.info(`✅ Admin ${req.user.email} successfully saved override for seller ${sellerId}, metric: ${metricName}, value: ${overrideValue}`);
-
-    res.json({
-      error: false,
-      message: 'Override saved successfully',
-      override: {
-        id: overrideId,
-        sellerId,
-        metricName,
-        period,
-        overrideValue,
-        periodSpecificValue: overrideValue,
-        originalValue: originalValue || 0,
-        createdAt: savedOverride[0].created_at,
-        updatedAt: savedOverride[0].updated_at
-      },
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    logger.error('Error saving admin override:', error);
-    res.status(500).json({
-      error: true,
-      message: 'Failed to save admin override',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  }
-}));
-
-// Reset override to default (delete override)
-router.delete('/seller/:sellerId/overrides/:metricName', asyncHandler(async (req, res) => {
-  try {
-    const { sellerId, metricName } = req.params;
-    
-    // Validate user exists (can be any role, not just seller)
-    const user = await executeQuery(
-      'SELECT id, full_name, email, role FROM users WHERE id = ?',
-      [sellerId]
-    );
-
-    if (user.length === 0) {
-      return res.status(404).json({
+    // Prevent admin users from resetting overrides for other admin users
+    if (user[0].role === 'admin') {
+      logger.warn(`❌ Admin user ${req.user.email} attempted to reset overrides for admin user ${user[0].full_name} (${sellerId})`);
+      return res.status(403).json({
         error: true,
-        message: 'User not found'
+        message: 'Admin users cannot have their analysis overrides reset by other admins'
       });
     }
 
-    // Delete the override
-    let result;
-    try {
-      result = await executeQuery(
-        'DELETE FROM admin_overrides WHERE seller_id = ? AND metric_name = ?',
-        [sellerId, metricName]
-      );
-    } catch (error) {
-      // If table doesn't exist, return success (nothing to delete)
-      if (error.code === 'ER_NO_SUCH_TABLE') {
-        logger.warn('admin_overrides table does not exist, nothing to delete');
-        result = { affectedRows: 0 };
-      } else {
-        throw error;
-      }
+    // Delete the specific override for this period
+    const result = await executeQuery(
+      'DELETE FROM admin_overrides WHERE seller_id = ? AND metric_name = ? AND metric_period = ?',
+      [sellerId, metricName, period]
+    );
+
+    if (result.affectedRows === 0) {
+      logger.warn(`⚠️ No override found to reset for seller ${sellerId}, metric: ${metricName}, period: ${period}`);
+      return res.status(404).json({
+        error: true,
+        message: 'Override not found'
+      });
     }
 
-    logger.info(`Admin ${req.user.email} reset override for seller ${sellerId}, metric: ${metricName}`);
+    logger.info(`✅ Successfully reset override for seller ${sellerId}, metric: ${metricName}, period: ${period}`);
 
     res.json({
       error: false,
       message: 'Override reset successfully',
+      deletedOverride: {
+        sellerId,
+        metricName,
+        period
+      },
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -5846,42 +6314,108 @@ router.delete('/seller/:sellerId/overrides/:metricName', asyncHandler(async (req
 router.put('/seller/:sellerId/overrides/:metricName/clear', asyncHandler(async (req, res) => {
   try {
     const { sellerId, metricName } = req.params;
+    const { period = 'total' } = req.body; // Get period from request body
     
-    // Validate user exists (can be any role, not just seller)
+    logger.info(`🧹 Clearing admin override for seller ${sellerId}, metric: ${metricName}, period: ${period}`);
+    
+    // Validate sellerId format
+    if (!sellerId || typeof sellerId !== 'string' || sellerId.length !== 36) {
+      logger.warn(`❌ Invalid sellerId format for override clear: ${sellerId}`);
+      return res.status(400).json({
+        error: true,
+        message: 'Invalid seller ID format'
+      });
+    }
+    
+    // Validate metric name
+    const allowedMetrics = [
+      'orders_sold',
+      'total_sales', 
+      'profit_forecast',
+      'visitors',
+      'shop_followers',
+      'shop_rating',
+      'credit_score'
+    ];
+    
+    if (!allowedMetrics.includes(metricName)) {
+      logger.warn(`❌ Invalid metric name for override clear: ${metricName}`);
+      return res.status(400).json({
+        error: true,
+        message: `Invalid metric name. Allowed values: ${allowedMetrics.join(', ')}`
+      });
+    }
+
+    // Validate period
+    const allowedPeriods = ['today', 'last7days', 'last30days', 'total'];
+    if (!allowedPeriods.includes(period)) {
+      logger.warn(`❌ Invalid period for override clear: ${period}`);
+      return res.status(400).json({
+        error: true,
+        message: `Invalid period. Allowed values: ${allowedPeriods.join(', ')}`
+      });
+    }
+
+    // Validate user exists
     const user = await executeQuery(
       'SELECT id, full_name, email, role FROM users WHERE id = ?',
       [sellerId]
     );
 
     if (user.length === 0) {
+      logger.warn(`❌ User not found for override clear: ${sellerId}`);
       return res.status(404).json({
         error: true,
         message: 'User not found'
       });
     }
 
-    // Update override to 0
-    let result;
-    try {
-      result = await executeQuery(
-        'UPDATE admin_overrides SET override_value = 0, updated_at = CURRENT_TIMESTAMP WHERE seller_id = ? AND metric_name = ?',
-        [sellerId, metricName]
-      );
-    } catch (error) {
-      // If table doesn't exist, return success (nothing to update)
-      if (error.code === 'ER_NO_SUCH_TABLE') {
-        logger.warn('admin_overrides table does not exist, nothing to update');
-        result = { affectedRows: 0 };
-      } else {
-        throw error;
-      }
+    // Prevent admin users from clearing overrides for other admin users
+    if (user[0].role === 'admin') {
+      logger.warn(`❌ Admin user ${req.user.email} attempted to clear overrides for admin user ${user[0].full_name} (${sellerId})`);
+      return res.status(403).json({
+        error: true,
+        message: 'Admin users cannot have their analysis overrides cleared by other admins'
+      });
     }
 
-    logger.info(`Admin ${req.user.email} cleared override for seller ${sellerId}, metric: ${metricName}`);
+    // Check if override exists for this period
+    const existingOverride = await executeQuery(
+      'SELECT * FROM admin_overrides WHERE seller_id = ? AND metric_name = ? AND metric_period = ?',
+      [sellerId, metricName, period]
+    );
+
+    if (existingOverride.length === 0) {
+      // Create a new override with value 0
+      const overrideId = uuidv4();
+      await executeQuery(`
+        INSERT INTO admin_overrides (id, seller_id, metric_name, metric_period, override_value, period_specific_value, original_value) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [overrideId, sellerId, metricName, period, 0, 0, 0]);
+      
+      logger.info(`✅ Created new cleared override for seller ${sellerId}, metric: ${metricName}, period: ${period}`);
+    } else {
+      // Update existing override to 0
+      await executeQuery(`
+        UPDATE admin_overrides 
+        SET override_value = 0, 
+            period_specific_value = 0,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE seller_id = ? AND metric_name = ? AND metric_period = ?
+      `, [sellerId, metricName, period]);
+      
+      logger.info(`✅ Updated existing override to 0 for seller ${sellerId}, metric: ${metricName}, period: ${period}`);
+    }
 
     res.json({
       error: false,
       message: 'Override cleared successfully',
+      clearedOverride: {
+        sellerId,
+        metricName,
+        period,
+        value: 0
+      },
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -5901,7 +6435,7 @@ router.get('/seller/:sellerId/dashboard', asyncHandler(async (req, res) => {
     
     // Validate seller exists
     const seller = await executeQuery(
-      'SELECT id, full_name, email, role, business_info FROM users WHERE id = ? AND role = "seller"',
+      'SELECT id, full_name, email, role, business_info FROM users WHERE id = ? AND role = "seller" AND role != "admin"',
       [sellerId]
     );
 
@@ -6092,5 +6626,727 @@ router.get('/debug-impersonation', asyncHandler(async (req, res) => {
     });
   }
 }));
+
+// Get comprehensive admin overrides summary for a seller
+router.get('/seller/:sellerId/overrides/summary', asyncHandler(async (req, res) => {
+  try {
+    const { sellerId } = req.params;
+    
+    logger.info(`📊 Getting comprehensive overrides summary for seller ${sellerId}`);
+    
+    // Validate sellerId format
+    if (!sellerId || typeof sellerId !== 'string' || sellerId.length !== 36) {
+      logger.warn(`❌ Invalid sellerId format for overrides summary: ${sellerId}`);
+      return res.status(400).json({
+        error: true,
+        message: 'Invalid seller ID format'
+      });
+    }
+
+    // Validate user exists
+    const user = await executeQuery(
+      'SELECT id, full_name, email, role FROM users WHERE id = ?',
+      [sellerId]
+    );
+
+    if (user.length === 0) {
+      logger.warn(`❌ User not found for overrides summary: ${sellerId}`);
+      return res.status(404).json({
+        error: true,
+        message: 'User not found'
+      });
+    }
+
+    // Get comprehensive overrides data
+    const overrides = await executeQuery(`
+      SELECT 
+        id, 
+        metric_name, 
+        metric_period, 
+        override_value, 
+        period_specific_value, 
+        original_value, 
+        created_at, 
+        updated_at
+      FROM admin_overrides 
+      WHERE seller_id = ? 
+      ORDER BY metric_name, metric_period
+    `, [sellerId]);
+
+    // Get fake stats data for comparison
+    const fakeStats = await executeQuery(`
+      SELECT 
+        timeframe,
+        fake_orders,
+        fake_sales,
+        fake_revenue,
+        fake_products,
+        fake_customers,
+        fake_visitors,
+        fake_followers,
+        fake_rating,
+        fake_credit_score
+      FROM seller_fake_stats 
+      WHERE seller_id = ?
+      ORDER BY timeframe
+    `, [sellerId]);
+
+    // Structure the response by periods
+    const periods = ['today', 'last7days', 'last30days', 'total'];
+    const metrics = ['orders_sold', 'total_sales', 'profit_forecast', 'visitors', 'shop_followers', 'shop_rating', 'credit_score', 'total_customers'];
+    
+    const structuredData = {};
+    
+    periods.forEach(period => {
+      structuredData[period] = {};
+      metrics.forEach(metric => {
+        const override = overrides.find(o => o.metric_period === period && o.metric_name === metric);
+        const fakeStat = fakeStats.find(f => {
+          // Map admin override periods to fake stats timeframes
+          if (period === 'today' && f.timeframe === 'today') return true;
+          if (period === 'last7days' && f.timeframe === '7days') return true;
+          if (period === 'last30days' && f.timeframe === '30days') return true;
+          if (period === 'total' && f.timeframe === 'total') return true;
+          return false;
+        });
+        
+        structuredData[period][metric] = {
+          hasOverride: !!override,
+          overrideValue: override ? parseFloat(override.override_value) : null,
+          periodSpecificValue: override ? parseFloat(override.period_specific_value) : null,
+          originalValue: override ? parseFloat(override.original_value) : null,
+          fakeStatValue: getFakeStatValue(fakeStat, metric),
+          createdAt: override ? override.created_at : null,
+          updatedAt: override ? override.updated_at : null
+        };
+      });
+    });
+
+    // Calculate summary statistics
+    const summary = {
+      totalOverrides: overrides.length,
+      periodsWithOverrides: periods.filter(period => 
+        Object.values(structuredData[period]).some(metric => metric.hasOverride)
+      ),
+      metricsWithOverrides: metrics.filter(metric => 
+        periods.some(period => structuredData[period][metric].hasOverride)
+      ),
+      overridesByPeriod: periods.map(period => ({
+        period,
+        count: Object.values(structuredData[period]).filter(metric => metric.hasOverride).length
+      })),
+      overridesByMetric: metrics.map(metric => ({
+        metric,
+        count: periods.filter(period => structuredData[period][metric].hasOverride).length
+      }))
+    };
+
+    logger.info(`✅ Successfully generated comprehensive overrides summary for seller ${sellerId}`);
+
+    res.json({
+      error: false,
+      seller: user[0],
+      structuredData,
+      summary,
+      rawData: {
+        overrides,
+        fakeStats
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error getting comprehensive overrides summary:', error);
+    res.status(500).json({
+      error: true,
+      message: 'Failed to get comprehensive overrides summary',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}));
+
+// Helper function to extract fake stat values
+function getFakeStatValue(fakeStat, metric) {
+  if (!fakeStat) return null;
+  
+  const metricMapping = {
+    'orders_sold': fakeStat.fake_orders,
+    'total_sales': fakeStat.fake_sales,
+    'profit_forecast': fakeStat.fake_revenue,
+    'visitors': fakeStat.fake_visitors,
+    'shop_followers': fakeStat.fake_followers,
+    'shop_rating': fakeStat.fake_rating,
+    'credit_score': fakeStat.fake_credit_score
+  };
+  
+  return metricMapping[metric] || null;
+}
+
+// Create or update admin overrides for multiple metrics and periods
+router.post('/seller/:sellerId/overrides', asyncHandler(async (req, res) => {
+  try {
+    const { sellerId } = req.params;
+    const requestBody = req.body;
+    
+    logger.info(`💾 Saving admin overrides for seller ${sellerId} with new schema:`, requestBody);
+    
+    // Validate sellerId format
+    if (!sellerId || typeof sellerId !== 'string' || sellerId.length !== 36) {
+      logger.warn(`❌ Invalid sellerId format for override: ${sellerId}`);
+      return res.status(400).json({
+        error: true,
+        message: 'Invalid seller ID format'
+      });
+    }
+    
+    // Validate request body structure
+    if (!requestBody || typeof requestBody !== 'object' || Object.keys(requestBody).length === 0) {
+      logger.warn(`❌ Invalid request body for seller ${sellerId}:`, requestBody);
+      return res.status(400).json({
+        error: true,
+        message: 'Request body must contain at least one metric value'
+      });
+    }
+
+    // Validate user exists
+    const user = await executeQuery(
+      'SELECT id, full_name, email, role FROM users WHERE id = ?',
+      [sellerId]
+    );
+
+    if (user.length === 0) {
+      logger.warn(`❌ User not found for override: ${sellerId}`);
+      return res.status(404).json({
+        error: true,
+        message: 'User not found'
+      });
+    }
+
+    logger.info(`🔍 Found user: ${user[0].full_name} with role: ${user[0].role}`);
+
+    // Prevent admin users from saving overrides for other admin users
+    if (user[0].role === 'admin') {
+      logger.warn(`❌ Admin user ${req.user.email} attempted to save overrides for admin user ${user[0].full_name} (${sellerId})`);
+      return res.status(403).json({
+        error: true,
+        message: 'Admin users cannot have their analysis overridden by other admins'
+      });
+    }
+
+    // Define the allowed metric names and their validation rules
+    const metricValidationRules = {
+      'orders_sold': { min: 0, type: 'integer' },
+      'total_sales': { min: 0, type: 'decimal' },
+      'profit_forecast': { min: 0, type: 'decimal' },
+      'visitors': { min: 0, type: 'integer' },
+      'shop_followers': { min: 0, type: 'integer' },
+      'shop_rating': { min: 0, max: 5, type: 'decimal' },
+      'credit_score': { min: 300, max: 850, type: 'integer' },
+      'total_customers': { min: 0, type: 'integer' }
+    };
+
+    // Define the allowed time periods
+    const allowedPeriods = ['today', 'last7', 'last30', 'total'];
+
+    // Parse and validate the request body
+    const overridesToSave = [];
+    const errors = [];
+
+    for (const [key, value] of Object.entries(requestBody)) {
+      // Accept flexible key formats for period prefixes to support multiple frontends
+      // Supported examples: today_orders_sold, last7_orders_sold, last7days_orders_sold, last7_days_orders_sold, last30_*, total_*
+      const rawKey = String(key);
+      const lowerKey = rawKey.toLowerCase();
+
+      let period;
+      let metricName;
+
+      if (lowerKey.startsWith('today_')) {
+        period = 'today';
+        metricName = rawKey.substring('today_'.length);
+      } else if (lowerKey.startsWith('total_')) {
+        period = 'total';
+        metricName = rawKey.substring('total_'.length);
+      } else if (lowerKey.startsWith('last7days_')) {
+        period = 'last7days';
+        metricName = rawKey.substring('last7days_'.length);
+      } else if (lowerKey.startsWith('last7_days_')) {
+        period = 'last7days';
+        metricName = rawKey.substring('last7_days_'.length);
+      } else if (lowerKey.startsWith('last7_')) {
+        period = 'last7days';
+        metricName = rawKey.substring('last7_'.length);
+      } else if (lowerKey.startsWith('last30days_')) {
+        period = 'last30days';
+        metricName = rawKey.substring('last30days_'.length);
+      } else if (lowerKey.startsWith('last30_days_')) {
+        period = 'last30days';
+        metricName = rawKey.substring('last30_days_'.length);
+      } else if (lowerKey.startsWith('last30_')) {
+        period = 'last30days';
+        metricName = rawKey.substring('last30_'.length);
+      } else {
+        // Fallback to legacy parser: {period}_{metric_name} or last7_days_{metric}
+        const keyParts = rawKey.split('_');
+        if (keyParts.length < 2) {
+          errors.push(`Invalid key format: ${rawKey}. Expected format: {period}_{metric_name}`);
+          continue;
+        }
+        if (keyParts[0] === 'last7' && keyParts[1] === 'days') {
+          period = 'last7days';
+          metricName = keyParts.slice(2).join('_');
+        } else if (keyParts[0] === 'last30' && keyParts[1] === 'days') {
+          period = 'last30days';
+          metricName = keyParts.slice(2).join('_');
+        } else if (keyParts[0] === 'today' || keyParts[0] === 'total') {
+          period = keyParts[0];
+          metricName = keyParts.slice(1).join('_');
+        } else {
+          errors.push(`Invalid period in key: ${rawKey}. Allowed periods: today, last7, last30, total`);
+          continue;
+        }
+      }
+
+      // Validate period
+      if (!allowedPeriods.includes(period === 'last7days' ? 'last7' : period === 'last30days' ? 'last30' : period)) {
+        errors.push(`Invalid period: ${period}. Allowed periods: today, last7, last30, total`);
+        continue;
+      }
+
+      // Validate metric name
+      if (!metricValidationRules[metricName]) {
+        errors.push(`Invalid metric name: ${metricName}. Allowed metrics: ${Object.keys(metricValidationRules).join(', ')}`);
+        continue;
+      }
+
+      // Validate value type and range
+      const numericValue = parseFloat(value);
+      if (isNaN(numericValue)) {
+        errors.push(`Invalid value for ${key}: ${value}. Must be a valid number`);
+        continue;
+      }
+
+      const rule = metricValidationRules[metricName];
+      if (rule.min !== undefined && numericValue < rule.min) {
+        errors.push(`Value for ${key} (${numericValue}) cannot be less than ${rule.min}`);
+        continue;
+      }
+      if (rule.max !== undefined && numericValue > rule.max) {
+        errors.push(`Value for ${key} (${numericValue}) cannot be greater than ${rule.max}`);
+        continue;
+      }
+
+      // Add to overrides to save
+      overridesToSave.push({
+        period,
+        metricName,
+        value: numericValue,
+        key
+      });
+    }
+
+    // If there are validation errors, return them
+    if (errors.length > 0) {
+      logger.warn(`❌ Validation errors for seller ${sellerId}:`, errors);
+      return res.status(400).json({
+        error: true,
+        message: 'Validation failed',
+        errors
+      });
+    }
+
+    if (overridesToSave.length === 0) {
+      logger.warn(`❌ No valid overrides to save for seller ${sellerId}`);
+      return res.status(400).json({
+        error: true,
+        message: 'No valid overrides to save'
+      });
+    }
+
+    logger.info(`✅ Validated ${overridesToSave.length} overrides for seller ${sellerId}`);
+
+    // Save each override to the database
+    const savedOverrides = [];
+    const failedOverrides = [];
+
+    for (const override of overridesToSave) {
+      try {
+        // Check if override already exists for this seller, metric, and period
+        const existingOverride = await executeQuery(
+          'SELECT * FROM admin_overrides WHERE seller_id = ? AND metric_name = ? AND metric_period = ?',
+          [sellerId, override.metricName, override.period]
+        );
+
+        let result;
+        let overrideId;
+
+        if (existingOverride.length > 0) {
+          // Update existing override
+          overrideId = existingOverride[0].id;
+          result = await executeQuery(`
+            UPDATE admin_overrides 
+            SET override_value = ?, 
+                period_specific_value = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `, [override.value, override.value, overrideId]);
+          logger.info(`✅ Updated existing override ${overrideId} for metric ${override.metricName}, period ${override.period}`);
+        } else {
+          // Insert new override
+          overrideId = uuidv4();
+          result = await executeQuery(`
+            INSERT INTO admin_overrides (id, seller_id, metric_name, metric_period, override_value, period_specific_value, original_value) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `, [overrideId, sellerId, override.metricName, override.period, override.value, override.value, 0]);
+          logger.info(`✅ Created new override ${overrideId} for metric ${override.metricName}, period ${override.period}`);
+        }
+
+        // Verify the override was saved
+        const savedOverride = await executeQuery(
+          'SELECT * FROM admin_overrides WHERE id = ?',
+          [overrideId]
+        );
+
+        if (savedOverride.length > 0) {
+          savedOverrides.push({
+            id: overrideId,
+            sellerId,
+            metricName: override.metricName,
+            period: override.period,
+            overrideValue: override.value,
+            periodSpecificValue: override.value,
+            originalValue: 0,
+            createdAt: savedOverride[0].created_at,
+            updatedAt: savedOverride[0].updated_at,
+            key: override.key
+          });
+        } else {
+          failedOverrides.push({
+            key: override.key,
+            error: 'Failed to verify override was saved'
+          });
+        }
+      } catch (error) {
+        logger.error(`❌ Error saving override for ${override.key}:`, error);
+        failedOverrides.push({
+          key: override.key,
+          error: error.message
+        });
+      }
+    }
+
+    // If total_customers (total) was included, auto-generate related period overrides
+    try {
+      const totalCustomersOverride = overridesToSave.find(o => o.metricName === 'total_customers' && o.period === 'total');
+      if (totalCustomersOverride) {
+        const totalVal = totalCustomersOverride.value;
+        // Generate random but sensible values for other periods based on total
+        const randBetween = (min, max) => Math.floor(min + Math.random() * (max - min + 1));
+        const todayVal = Math.max(0, randBetween(Math.floor(totalVal * 0.005), Math.floor(totalVal * 0.02)));
+        const last7Val = Math.max(0, randBetween(Math.floor(totalVal * 0.05), Math.floor(totalVal * 0.2)));
+        const last30Val = Math.max(0, randBetween(Math.floor(totalVal * 0.2), Math.floor(totalVal * 0.6)));
+
+        const ensureOverride = async (period, value) => {
+          const existing = await executeQuery(
+            'SELECT id FROM admin_overrides WHERE seller_id = ? AND metric_name = ? AND metric_period = ?',
+            [sellerId, 'total_customers', period]
+          );
+          if (existing.length > 0) {
+            await executeQuery(
+              'UPDATE admin_overrides SET override_value = ?, period_specific_value = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+              [value, value, existing[0].id]
+            );
+          } else {
+            const id = uuidv4();
+            await executeQuery(
+              'INSERT INTO admin_overrides (id, seller_id, metric_name, metric_period, override_value, period_specific_value, original_value) VALUES (?, ?, ?, ?, ?, ?, ?)',
+              [id, sellerId, 'total_customers', period, value, value, 0]
+            );
+          }
+        };
+
+        await ensureOverride('today', todayVal);
+        await ensureOverride('last7days', last7Val);
+        await ensureOverride('last30days', last30Val);
+        logger.info(`Auto-generated customer overrides for seller ${sellerId}: today=${todayVal}, last7days=${last7Val}, last30days=${last30Val}`);
+      }
+    } catch (genErr) {
+      logger.warn('Failed to auto-generate period customer overrides:', genErr.message);
+    }
+
+    // If overrides include orders_sold, reconcile synthetic orders now
+    try {
+      const touchedOrders = overridesToSave.some(o => o.metricName === 'orders_sold');
+      if (touchedOrders) {
+        await generateSyntheticDataForSeller(sellerId);
+        logger.info(`Reconciled synthetic orders for seller ${sellerId} after orders_sold override save`);
+      }
+    } catch (genErr) {
+      logger.warn('Synthetic generation after overrides save failed:', genErr.message);
+    }
+
+    // Prepare response
+    const response = {
+      error: false,
+      message: `Successfully saved ${savedOverrides.length} overrides${failedOverrides.length > 0 ? `, ${failedOverrides.length} failed` : ''}`,
+      savedOverrides,
+      failedOverrides,
+      summary: {
+        total: overridesToSave.length,
+        successful: savedOverrides.length,
+        failed: failedOverrides.length
+      },
+      timestamp: new Date().toISOString()
+    };
+
+    if (failedOverrides.length > 0) {
+      response.warnings = `Some overrides failed to save. Check failedOverrides for details.`;
+    }
+
+    logger.info(`✅ Admin ${req.user.email} successfully saved overrides for seller ${sellerId}:`, {
+      successful: savedOverrides.length,
+      failed: failedOverrides.length
+    });
+
+    res.json(response);
+  } catch (error) {
+    logger.error('Error saving admin overrides:', error);
+    res.status(500).json({
+      error: true,
+      message: 'Failed to save admin overrides',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}));
+
+// --- Synthetic data helpers ---
+async function ensureSyntheticTables() {
+  try {
+    await executeQuery(`
+      CREATE TABLE IF NOT EXISTS synthetic_orders (
+        id VARCHAR(36) PRIMARY KEY,
+        order_number VARCHAR(64) NOT NULL,
+        seller_id VARCHAR(36) NOT NULL,
+        customer_name VARCHAR(100),
+        customer_email VARCHAR(120),
+        status VARCHAR(20) DEFAULT 'delivered',
+        total_amount DECIMAL(12,2) DEFAULT 0,
+        subtotal DECIMAL(12,2) DEFAULT 0,
+        tax_amount DECIMAL(12,2) DEFAULT 0,
+        shipping_amount DECIMAL(12,2) DEFAULT 0,
+        created_at DATETIME NOT NULL,
+        updated_at DATETIME NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    await executeQuery(`
+      CREATE TABLE IF NOT EXISTS synthetic_order_items (
+        id VARCHAR(36) PRIMARY KEY,
+        order_id VARCHAR(36) NOT NULL,
+        product_id VARCHAR(36) NOT NULL,
+        product_name VARCHAR(255) NOT NULL,
+        product_sku VARCHAR(100),
+        quantity INT DEFAULT 1,
+        unit_price DECIMAL(12,2) DEFAULT 0,
+        total_price DECIMAL(12,2) DEFAULT 0,
+        created_at DATETIME NOT NULL,
+        INDEX (order_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+  } catch (e) {
+    throw e;
+  }
+}
+
+async function generateSyntheticDataForSeller(sellerId) {
+  await ensureSyntheticTables();
+  let products = await executeQuery(
+    'SELECT id, name, sku, price FROM products WHERE created_by = ? AND (is_active = TRUE OR is_active IS NULL) LIMIT 100',
+    [sellerId]
+  );
+  if (!products || products.length === 0) {
+    // Fallback to any active product globally so generation still proceeds
+    products = await executeQuery(
+      'SELECT id, name, sku, price FROM products WHERE (is_active = TRUE OR is_active IS NULL) LIMIT 100'
+    );
+  }
+  if (!products || products.length === 0) {
+    throw new Error('No active products available to generate synthetic orders');
+  }
+
+  // Load overrides for targets
+  const overrides = await executeQuery(
+    'SELECT metric_name, metric_period, COALESCE(period_specific_value, override_value) as value FROM admin_overrides WHERE seller_id = ?',
+    [sellerId]
+  );
+
+  const getVal = (metric, period) => {
+    const row = overrides.find(o => o.metric_name === metric && o.metric_period === period);
+    const v = row ? parseFloat(row.value) : NaN;
+    return isNaN(v) ? null : v;
+  };
+
+  const totalOrdersTarget = getVal('orders_sold', 'total');
+  const targets = {
+    today: getVal('orders_sold', 'today'),
+    last7days: getVal('orders_sold', 'last7days'),
+    last30days: getVal('orders_sold', 'last30days'),
+    total: totalOrdersTarget
+  };
+
+  // If granular targets are missing but total exists, derive sensible defaults
+  const derive = (fraction, min = 0) => Math.max(min, Math.floor((totalOrdersTarget || 0) * fraction));
+  if (targets.today == null && totalOrdersTarget != null) targets.today = derive(0.02);
+  if (targets.last7days == null && totalOrdersTarget != null) targets.last7days = derive(0.12);
+  if (targets.last30days == null && totalOrdersTarget != null) targets.last30days = derive(0.45);
+
+  // Helpers to count existing real+synthetic per period
+  const whereForPeriod = (alias, period) => {
+    if (period === 'today') return `DATE(${alias}.created_at) = CURDATE()`;
+    if (period === 'last7days') return `${alias}.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)`;
+    if (period === 'last30days') return `${alias}.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`;
+    // total older-than-30-days bucket
+    if (period === 'olderThan30') return `${alias}.created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)`;
+    return '1=1';
+  };
+
+  const countReal = async (periodCond) => {
+    const r = await executeQuery(`SELECT COUNT(*) as c FROM orders o WHERE o.seller_id = ? AND ${periodCond}`,[sellerId]);
+    return r[0]?.c || 0;
+  };
+  const countSynth = async (periodCond) => {
+    const r = await executeQuery(`SELECT COUNT(*) as c FROM synthetic_orders s WHERE s.seller_id = ? AND ${periodCond}`,[sellerId]);
+    return r[0]?.c || 0;
+  };
+
+  const deleteSynth = async (period) => {
+    // Delete one synthetic order from the given period (most recent first)
+    let periodCond;
+    if (period === 'today' || period === 'last7days' || period === 'last30days') {
+      periodCond = whereForPeriod('s', period);
+    } else if (period === 'olderThan30') {
+      periodCond = whereForPeriod('s', 'olderThan30');
+    } else {
+      periodCond = '1=1';
+    }
+    const rows = await executeQuery(`SELECT id FROM synthetic_orders s WHERE s.seller_id = ? AND ${periodCond} ORDER BY s.created_at DESC LIMIT 1`, [sellerId]);
+    if (rows.length > 0) {
+      const oid = rows[0].id;
+      await executeQuery('DELETE FROM synthetic_order_items WHERE order_id = ?', [oid]);
+      await executeQuery('DELETE FROM synthetic_orders WHERE id = ?', [oid]);
+      return true;
+    }
+    return false;
+  };
+
+  const createSynth = async (period, count) => {
+    for (let i=0; i<count; i++) {
+      const p = products[Math.floor(Math.random()*products.length)];
+      const qty = Math.floor(Math.random()*3)+1;
+      const unit = parseFloat(p.price)||0;
+      const subtotal = unit*qty;
+      const tax = +(subtotal*0.1).toFixed(2);
+      const shipping = 0;
+      const total = +(subtotal+tax+shipping).toFixed(2);
+      const dt = randomDateForPeriod(period);
+      const orderId = uuidv4();
+      const orderNumber = `SYN-${period.toUpperCase()}-${Date.now()}-${Math.random().toString(36).slice(2,8).toUpperCase()}`;
+      await executeQuery(
+        'INSERT INTO synthetic_orders (id, order_number, seller_id, customer_name, customer_email, status, total_amount, subtotal, tax_amount, shipping_amount, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [orderId, orderNumber, sellerId, randomName(), randomEmail(), 'delivered', total, subtotal, tax, shipping, dt, dt]
+      );
+      await executeQuery(
+        'INSERT INTO synthetic_order_items (id, order_id, product_id, product_name, product_sku, quantity, unit_price, total_price, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [uuidv4(), orderId, p.id, p.name, p.sku || null, qty, unit, subtotal, dt]
+      );
+    }
+  };
+
+  // Adjust today, last7days, last30days to exact targets relative to real+synthetic
+  for (const period of ['today','last7days','last30days']) {
+    if (targets[period] == null) continue; // nothing to enforce
+    const cond = whereForPeriod('x', period);
+    const real = await countReal(cond.replace(/x\./g, 'o.'));
+    const synth = await countSynth(cond.replace(/x\./g, 's.'));
+    const target = Math.max(0, Math.floor(targets[period]));
+    const delta = target - (real + synth);
+    if (delta > 0) {
+      await createSynth(period, Math.min(1000, delta));
+    } else if (delta < 0) {
+      let toDelete = Math.min(1000, -delta);
+      while (toDelete > 0) {
+        const ok = await deleteSynth(period);
+        if (!ok) break;
+        toDelete--;
+      }
+    }
+  }
+
+  // Adjust total using only orders older than 30 days to avoid disturbing recent periods
+  if (targets.total != null) {
+    const realTotal = await countReal('1=1');
+    const synthTotal = await countSynth('1=1');
+    const targetAll = Math.max(0, Math.floor(targets.total));
+    let deltaAll = targetAll - (realTotal + synthTotal);
+    if (deltaAll > 0) {
+      // Create older-than-30-days synthetic orders
+      for (let i=0;i<Math.min(5000, deltaAll);i++) {
+        const p = products[Math.floor(Math.random()*products.length)];
+        const qty = Math.floor(Math.random()*3)+1;
+        const unit = parseFloat(p.price)||0;
+        const subtotal = unit*qty;
+        const tax = +(subtotal*0.1).toFixed(2);
+        const shipping = 0;
+        const total = +(subtotal+tax+shipping).toFixed(2);
+        const dt = randomDateForPeriod('olderThan30');
+        const orderId = uuidv4();
+        const orderNumber = `SYN-TOTAL-${Date.now()}-${Math.random().toString(36).slice(2,8).toUpperCase()}`;
+        await executeQuery(
+          'INSERT INTO synthetic_orders (id, order_number, seller_id, customer_name, customer_email, status, total_amount, subtotal, tax_amount, shipping_amount, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [orderId, orderNumber, sellerId, randomName(), randomEmail(), 'delivered', total, subtotal, tax, shipping, dt, dt]
+        );
+        await executeQuery(
+          'INSERT INTO synthetic_order_items (id, order_id, product_id, product_name, product_sku, quantity, unit_price, total_price, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [uuidv4(), orderId, p.id, p.name, p.sku || null, qty, unit, subtotal, dt]
+        );
+      }
+    } else if (deltaAll < 0) {
+      // Remove from older-than-30 bucket first
+      let toDelete = Math.min(5000, -deltaAll);
+      while (toDelete > 0) {
+        const ok = await deleteSynth('olderThan30');
+        if (!ok) break;
+        toDelete--;
+      }
+    }
+  }
+}
+
+function randomDateForPeriod(period){
+  const now = new Date();
+  let start;
+  if(period==='today') start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  else if(period==='last7days') start = new Date(now.getTime()-7*24*60*60*1000);
+  else if(period==='last30days') start = new Date(now.getTime()-30*24*60*60*1000);
+  else if(period==='olderThan30') {
+    const maxDays = 365; // up to 1 year back for older totals
+    const min = new Date(now.getTime()-maxDays*24*60*60*1000);
+    const max = new Date(now.getTime()-31*24*60*60*1000);
+    const tOld = min.getTime()+Math.random()*(max.getTime()-min.getTime());
+    return new Date(tOld);
+  } else {
+    start = new Date(now.getTime()-30*24*60*60*1000);
+  }
+  const t = start.getTime()+Math.random()*(now.getTime()-start.getTime());
+  return new Date(t);
+}
+function randomName(){
+  const first=['Alex','Sam','Jordan','Taylor','Casey','Drew','Jamie','Morgan'];
+  const last=['Smith','Johnson','Lee','Brown','Garcia','Martinez','Davis','Lopez'];
+  return `${first[Math.floor(Math.random()*first.length)]} ${last[Math.floor(Math.random()*last.length)]}`;
+}
+function randomEmail(){
+  const domains=['example.com','mail.com','test.com'];
+  const id=Math.random().toString(36).slice(2,8);
+  return `customer_${id}@${domains[Math.floor(Math.random()*domains.length)]}`;
+}
 
 module.exports = router;

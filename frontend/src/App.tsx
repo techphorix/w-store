@@ -24,6 +24,7 @@ const ShopManagement = lazy(() => import('./pages/user/ShopManagement'));
 const UserRegistration = lazy(() => import('./pages/Register'));
 const RegistrationSuccess = lazy(() => import('./pages/RegistrationSuccess'));
 const EmailVerification = lazy(() => import('./pages/EmailVerification'));
+const ProductDetail = lazy(() => import('./pages/public/ProductDetail'));
 
 // Admin Pages
 const AdminDashboard = lazy(() => import('./pages/admin/AdminDashboard'));
@@ -49,6 +50,8 @@ const SystemMetrics = lazy(() => import('./pages/admin/SystemMetrics'));
 const Notifications = lazy(() => import('./pages/admin/Notifications'));
 const Messages = lazy(() => import('./pages/admin/Messages'));
 const Announcements = lazy(() => import('./pages/admin/Announcements'));
+const PaymentMethodsManagement = lazy(() => import('./pages/admin/PaymentMethodsManagement'));
+const FinancialManagement = lazy(() => import('./pages/admin/FinancialManagement'));
 const SystemTools = lazy(() => import('./pages/admin/SystemTools'));
 const DatabaseManagement = lazy(() => import('./pages/admin/DatabaseManagement'));
 const SellerComparisonTool = lazy(() => import('./components/SellerComparisonTool'));
@@ -164,6 +167,10 @@ function App() {
             <Route 
               path="/shop/:shopname" 
               element={<UserShop />} 
+            />
+            <Route 
+              path="/product/:id"
+              element={<ProductDetail />}
             />
             <Route 
               path="/checkout/:shopname" 
@@ -393,10 +400,26 @@ function App() {
               } 
             />
             <Route 
+              path="/admin/financial-management" 
+              element={
+                <AdminRoute>
+                  <FinancialManagement />
+                </AdminRoute>
+              } 
+            />
+            <Route 
               path="/admin/system-metrics" 
               element={
                 <AdminRoute>
                   <SystemMetrics />
+                </AdminRoute>
+              } 
+            />
+            <Route 
+              path="/admin/payment-methods" 
+              element={
+                <AdminRoute>
+                  <PaymentMethodsManagement />
                 </AdminRoute>
               } 
             />

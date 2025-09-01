@@ -75,6 +75,118 @@ const connectDB = async () => {
     // Test the connection
     const connection = await pool.getConnection();
     await connection.ping();
+    // Ensure finance-related tables exist
+    try {
+      await connection.execute(`
+        CREATE TABLE IF NOT EXISTS payment_methods (
+          id VARCHAR(36) PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          type ENUM('deposit', 'withdrawal', 'both') NOT NULL DEFAULT 'both',
+          description TEXT,
+          icon VARCHAR(100),
+          is_active BOOLEAN DEFAULT TRUE,
+          processing_time VARCHAR(100) DEFAULT '1-3 business days',
+          min_amount DECIMAL(10,2) DEFAULT 0,
+          max_amount DECIMAL(10,2) DEFAULT 999999.99,
+          fees_percentage DECIMAL(5,2) DEFAULT 0,
+          fees_fixed DECIMAL(10,2) DEFAULT 0,
+          requires_verification BOOLEAN DEFAULT FALSE,
+          verification_fields JSON,
+          config JSON,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          created_by VARCHAR(36),
+          INDEX idx_type (type),
+          INDEX idx_active (is_active),
+          INDEX idx_created_by (created_by)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+      logger.info('Payment methods table ensured');
+    } catch (error) {
+      logger.error('Error creating payment_methods table:', error);
+    }
+
+    try {
+      await connection.execute(`
+        CREATE TABLE IF NOT EXISTS withdrawal_methods (
+          id VARCHAR(36) PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          type ENUM('bank_transfer', 'paypal', 'stripe', 'crypto', 'check', 'other') NOT NULL,
+          description TEXT,
+          icon VARCHAR(100),
+          is_active BOOLEAN DEFAULT TRUE,
+          processing_time VARCHAR(100) DEFAULT '1-3 business days',
+          min_amount DECIMAL(10,2) DEFAULT 0,
+          max_amount DECIMAL(10,2) DEFAULT 999999.99,
+          fees_percentage DECIMAL(5,2) DEFAULT 0,
+          fees_fixed DECIMAL(10,2) DEFAULT 0,
+          requires_verification BOOLEAN DEFAULT FALSE,
+          verification_fields JSON,
+          config JSON,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          created_by VARCHAR(36),
+          INDEX idx_type (type),
+          INDEX idx_active (is_active),
+          INDEX idx_created_by (created_by)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+      logger.info('Withdrawal methods table ensured');
+    } catch (error) {
+      logger.error('Error creating withdrawal_methods table:', error);
+    }
+
+    try {
+      await connection.execute(`
+        CREATE TABLE IF NOT EXISTS manual_deposits (
+          id VARCHAR(36) PRIMARY KEY,
+          seller_id VARCHAR(36) NOT NULL,
+          method_id VARCHAR(36) NULL,
+          amount DECIMAL(10,2) NOT NULL,
+          currency VARCHAR(10) DEFAULT 'USD',
+          screenshot_url VARCHAR(500),
+          file_upload_id VARCHAR(36),
+          reference TEXT,
+          status ENUM('pending','approved','rejected') DEFAULT 'pending',
+          admin_note TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          FOREIGN KEY (seller_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (method_id) REFERENCES payment_methods(id) ON DELETE SET NULL,
+          INDEX idx_seller (seller_id),
+          INDEX idx_method (method_id),
+          INDEX idx_status (status),
+          INDEX idx_created_at (created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+      logger.info('Manual deposits table ensured');
+    } catch (error) {
+      logger.error('Error creating manual_deposits table:', error);
+    }
+
+    try {
+      await connection.execute(`
+        CREATE TABLE IF NOT EXISTS seller_withdrawal_accounts (
+          id VARCHAR(36) PRIMARY KEY,
+          seller_id VARCHAR(36) NOT NULL,
+          method_id VARCHAR(36) NOT NULL,
+          label VARCHAR(255),
+          details JSON,
+          is_default BOOLEAN DEFAULT FALSE,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          FOREIGN KEY (seller_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (method_id) REFERENCES withdrawal_methods(id) ON DELETE CASCADE,
+          INDEX idx_seller (seller_id),
+          INDEX idx_method (method_id),
+          INDEX idx_default (is_default)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+      logger.info('Seller withdrawal accounts table ensured');
+    } catch (error) {
+      logger.error('Error creating seller_withdrawal_accounts table:', error);
+    }
+
     connection.release();
     
     logger.info('✅ MySQL database connected successfully');
@@ -393,51 +505,30 @@ const initializeTables = async () => {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
-    // Fake data configurations table
-    await connection.execute(`
-      CREATE TABLE IF NOT EXISTS fake_data_configs (
-        id VARCHAR(36) PRIMARY KEY,
-        seller_id VARCHAR(36) NOT NULL,
-        seller_name VARCHAR(255) NOT NULL,
-        analytics JSON NOT NULL,
-        metadata JSON NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        status ENUM('active', 'inactive', 'deleted') DEFAULT 'active',
-        FOREIGN KEY (seller_id) REFERENCES users(id) ON DELETE CASCADE,
-        INDEX idx_seller_id (seller_id),
-        INDEX idx_status (status),
-        INDEX idx_created_at (created_at),
-        INDEX idx_updated_at (updated_at)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-
-    // Create fake stats table for admin overrides
+    // Create admin_overrides table for tab-specific metrics
     try {
       await connection.execute(`
-        CREATE TABLE IF NOT EXISTS seller_fake_stats (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          seller_id VARCHAR(255) NOT NULL,
-          timeframe ENUM('today', '7days', '30days', 'total') NOT NULL,
-          fake_orders INT DEFAULT 0,
-          fake_sales DECIMAL(10,2) DEFAULT 0.00,
-          fake_revenue DECIMAL(10,2) DEFAULT 0.00,
-          fake_products INT DEFAULT 0,
-          fake_customers INT DEFAULT 0,
-          fake_visitors INT DEFAULT 0,
-          fake_followers INT DEFAULT 0,
-          fake_rating DECIMAL(3,2) DEFAULT 0.00,
-          fake_credit_score INT DEFAULT 0,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-          UNIQUE KEY unique_seller_timeframe (seller_id, timeframe),
-          INDEX idx_seller_id (seller_id),
-          INDEX idx_timeframe (timeframe)
+        CREATE TABLE IF NOT EXISTS admin_overrides (
+          id VARCHAR(36) NOT NULL,
+          seller_id VARCHAR(36) NOT NULL,
+          metric_name VARCHAR(100) NOT NULL,
+          metric_period VARCHAR(20) DEFAULT 'total',
+          override_value DECIMAL(15,2) DEFAULT '0.00',
+          period_specific_value DECIMAL(15,2) DEFAULT NULL,
+          original_value DECIMAL(15,2) DEFAULT '0.00',
+          created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          UNIQUE KEY uniq_override_period (seller_id, metric_name, metric_period),
+          KEY idx_seller_id (seller_id),
+          KEY idx_metric_name (metric_name),
+          KEY idx_metric_period (metric_period),
+          CONSTRAINT admin_overrides_ibfk_1 FOREIGN KEY (seller_id) REFERENCES users (id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `);
-      logger.info('✅ Seller fake stats table created');
+      logger.info('✅ Admin overrides table created with period support');
     } catch (error) {
-      logger.error('❌ Error creating seller fake stats table:', error);
+      logger.error('❌ Error creating admin overrides table:', error);
     }
 
     connection.release();

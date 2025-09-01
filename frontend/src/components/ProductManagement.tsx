@@ -28,6 +28,7 @@ interface Product {
   stock_quantity: number;
   sku?: string;
   created_at: string;
+  seller_store?: string; // derived for view link
 }
 
 interface Category {
@@ -80,7 +81,8 @@ const ProductManagement: React.FC = () => {
           is_featured: typeof p.isFeatured === 'boolean' ? p.isFeatured : p.is_featured,
           stock_quantity: p.stock_quantity ?? p.stockQuantity ?? 0,
           sku: p.sku,
-          created_at: p.createdAt || p.created_at || new Date().toISOString()
+          created_at: p.createdAt || p.created_at || new Date().toISOString(),
+          seller_store: (p.seller?.businessInfo?.storeName || p.seller?.businessInfo?.business_name || p.seller?.fullName || '').toString()
         }));
         setProducts(normalized);
       }
@@ -110,6 +112,35 @@ const ProductManagement: React.FC = () => {
     fetchProducts();
   }, [fetchProducts]);
 
+  const getBackendOrigin = () => {
+    try {
+      const envUrl = (import.meta as any)?.env?.VITE_BACKEND_URL;
+      if (envUrl) return String(envUrl);
+      if (typeof window !== 'undefined' && window.location?.origin) {
+        return window.location.origin.replace(':3000', ':5000');
+      }
+    } catch {}
+    return '';
+  };
+
+  const resolveImageUrl = (url?: string) => {
+    if (!url) return '';
+    const s = String(url).trim();
+    if (!s) return '';
+    if (/^data:|^https?:\/\//i.test(s)) return s;
+    const origin = getBackendOrigin();
+    // If value is a plain filename, assume uploads/products
+    if (!s.startsWith('/')) {
+      const path = `/uploads/products/${s}`;
+      return origin ? `${origin}${path}` : path;
+    }
+    if (s.startsWith('/uploads')) {
+      return origin ? `${origin}${s}` : s;
+    }
+    return s;
+  };
+  const toShopSlug = (name?: string) => (name || '').replace(/^@+/, '').replace(/\s+/g, '').trim();
+
   const handleCreateProduct = () => {
     setEditingProduct(null);
     setFormData({
@@ -133,8 +164,8 @@ const ProductManagement: React.FC = () => {
       price: product.price,
       categoryId: product.category_id || '',
       stockQuantity: product.stock_quantity,
-      isActive: product.is_active,
-      isFeatured: product.is_featured,
+      isActive: !!product.is_active,
+      isFeatured: !!product.is_featured,
       images: product.images.map((url, index) => ({
         id: `existing-${index}`,
         url,
@@ -168,11 +199,11 @@ const ProductManagement: React.FC = () => {
       const formDataToSend = new FormData();
       formDataToSend.append('name', formData.name);
       formDataToSend.append('description', formData.description);
-      formDataToSend.append('price', formData.price.toString());
-      formDataToSend.append('categoryId', formData.categoryId);
-      formDataToSend.append('stockQuantity', formData.stockQuantity.toString());
-      formDataToSend.append('isActive', formData.isActive.toString());
-      formDataToSend.append('isFeatured', formData.isFeatured.toString());
+      formDataToSend.append('price', String(formData.price ?? 0));
+      formDataToSend.append('categoryId', String(formData.categoryId ?? ''));
+      formDataToSend.append('stockQuantity', String(formData.stockQuantity ?? 0));
+      formDataToSend.append('isActive', String(!!formData.isActive));
+      formDataToSend.append('isFeatured', String(!!formData.isFeatured));
 
       // Add new images - only send files that are actually new
       const newImages = formData.images.filter((image: any) => image.isNew && image.file);
@@ -326,7 +357,11 @@ const ProductManagement: React.FC = () => {
                       {product.images && product.images.length > 0 ? (
                         <img
                           className="h-12 w-12 rounded-lg object-cover"
-                          src={product.images[0]}
+                          src={resolveImageUrl(product.images[0])}
+                          onError={(e) => {
+                            const img = e.currentTarget as HTMLImageElement;
+                            if (img.src !== '/vite.svg') img.src = '/vite.svg';
+                          }}
                           alt={product.name}
                         />
                       ) : (
@@ -368,6 +403,26 @@ const ProductManagement: React.FC = () => {
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                   <div className="flex gap-2">
+                    <a
+                      href={product.id ? `/product/${encodeURIComponent(product.id)}` : undefined}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={`px-2 py-1 rounded text-xs ${product.id ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
+                      onClick={(e) => { if (!product.id) e.preventDefault(); }}
+                      title="View Product"
+                    >
+                      View Product
+                    </a>
+                    <a
+                      href={product.seller_store ? `/shop/${encodeURIComponent(toShopSlug(product.seller_store))}` : undefined}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={`px-2 py-1 rounded text-xs ${product.seller_store ? 'bg-gray-100 text-gray-700 hover:bg-gray-200' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
+                      onClick={(e) => { if (!product.seller_store) e.preventDefault(); }}
+                      title={product.seller_store ? `View ${product.seller_store}` : 'Seller store not available'}
+                    >
+                      View
+                    </a>
                     <button
                       onClick={() => handleEditProduct(product)}
                       className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200"

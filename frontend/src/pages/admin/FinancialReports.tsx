@@ -8,9 +8,10 @@ import {
   faSpinner,
   faExclamationTriangle,
   faCalendarAlt,
-  faChartLine,
   faChartBar,
-  faMinus
+  faMinus,
+  faArrowTrendUp,
+  faArrowTrendDown
 } from '@fortawesome/free-solid-svg-icons';
 import {
   Chart as ChartJS,
@@ -85,7 +86,36 @@ const FinancialReports = () => {
 
       // Use the admin API to get financial data
       const response = await adminApi.getFinancialReports({ period });
-      setFinancialData(response);
+      const f = (response && (response.financial || response)) || {};
+
+      // Normalize into the expected FinancialData shape
+      const daily: Array<{ date: string; revenue: number }> = Array.isArray(f.dailyRevenue)
+        ? f.dailyRevenue.map((r: any) => ({
+            date: r.date || r.created_at || r.day || '',
+            revenue: Number(r.revenue || r.total_revenue || 0)
+          }))
+        : [];
+
+      const normalized: FinancialData = {
+        revenue: {
+          labels: daily.map(d => d.date),
+          platform: daily.map(d => d.revenue),
+          commissions: daily.map(() => 0),
+        },
+        expenses: {
+          labels: daily.map(d => d.date),
+          data: daily.map(() => 0),
+        },
+        transactions: [],
+        summary: {
+          totalRevenue: Number(f?.summary?.total_revenue || 0),
+          totalExpenses: 0,
+          netProfit: Number(f?.summary?.total_revenue || 0),
+          growthRate: 0,
+        },
+      };
+
+      setFinancialData(normalized);
     } catch (error) {
       console.error('Error fetching financial data:', error);
       setError('Failed to load financial data');
@@ -108,8 +138,8 @@ const FinancialReports = () => {
   };
 
   const getGrowthIcon = (growth: number) => {
-    if (growth > 0) return faTrendingUp;
-    if (growth < 0) return faTrendingDown;
+    if (growth > 0) return faArrowTrendUp;
+    if (growth < 0) return faArrowTrendDown;
     return faMinus;
   };
 
@@ -159,19 +189,22 @@ const FinancialReports = () => {
     );
   }
 
+  const revenue = financialData?.revenue ?? { labels: [], platform: [], commissions: [] };
+  const expenses = financialData?.expenses ?? { labels: [], data: [] };
+
   const revenueChartData = {
-    labels: financialData.revenue.labels,
+    labels: revenue.labels,
     datasets: [
       {
         label: 'Platform Revenue ($)',
-        data: financialData.revenue.platform,
+        data: revenue.platform,
         borderColor: 'rgb(59, 130, 246)',
         backgroundColor: 'rgba(59, 130, 246, 0.1)',
         tension: 0.4,
       },
       {
         label: 'Commission Revenue ($)',
-        data: financialData.revenue.commissions,
+        data: revenue.commissions,
         borderColor: 'rgb(16, 185, 129)',
         backgroundColor: 'rgba(16, 185, 129, 0.1)',
         tension: 0.4,
@@ -180,11 +213,11 @@ const FinancialReports = () => {
   };
 
   const expensesChartData = {
-    labels: financialData.expenses.labels,
+    labels: expenses.labels,
     datasets: [
       {
         label: 'Expenses ($)',
-        data: financialData.expenses.data,
+        data: expenses.data,
         backgroundColor: 'rgba(239, 68, 68, 0.8)',
         borderColor: 'rgb(239, 68, 68)',
         borderWidth: 1,

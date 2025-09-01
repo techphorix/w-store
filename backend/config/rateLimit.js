@@ -1,5 +1,6 @@
 const rateLimit = require('express-rate-limit');
 const { logger } = require('../utils/logger');
+const isDev = process.env.NODE_ENV !== 'production';
 
 // Rate limiting configuration
 const rateLimitConfig = {
@@ -15,6 +16,8 @@ const rateLimitConfig = {
     standardHeaders: true,
     legacyHeaders: false,
     skip: (req) => {
+      // In development, disable general rate limiting to avoid noisy 429s
+      if (isDev) return true;
       // Skip rate limiting for health checks and static files
       return req.path === '/health' || req.path.startsWith('/uploads/');
     },
@@ -28,10 +31,10 @@ const rateLimitConfig = {
     }
   },
 
-  // Authentication endpoints
+  // Authentication endpoints (login, register, password reset)
   auth: {
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-    max: parseInt(process.env.RATE_LIMIT_AUTH_MAX) || 50, // 50 auth requests per 15 minutes
+    max: parseInt(process.env.RATE_LIMIT_AUTH_MAX) || 100, // 100 auth requests per 15 minutes
     message: {
       error: 'Authentication rate limit exceeded',
       message: 'Too many authentication attempts. Please try again later.',
@@ -48,6 +51,33 @@ const rateLimitConfig = {
       res.status(429).json({
         error: 'Authentication rate limit exceeded',
         message: 'Too many authentication attempts. Please try again later.',
+        retryAfter: Math.ceil((parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000) / 1000)
+      });
+    }
+  },
+
+  // User status check endpoints (/me, profile, etc.) - more lenient
+  userStatus: {
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
+    max: parseInt(process.env.RATE_LIMIT_USER_STATUS_MAX) || 1000, // 1000 status checks per 15 minutes
+    message: {
+      error: 'User status rate limit exceeded',
+      message: 'Too many status checks. Please try again later.',
+      retryAfter: Math.ceil((parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000) / 1000)
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+      // Use IP + user ID for user status endpoints
+      const userId = req.userId || 'anonymous';
+      return `${req.ip}-${userId}`;
+    },
+    skip: () => isDev,
+    handler: (req, res) => {
+      logger.warn(`User status rate limit exceeded for IP: ${req.ip}, User: ${req.userId || 'anonymous'}`);
+      res.status(429).json({
+        error: 'User status rate limit exceeded',
+        message: 'Too many status checks. Please try again later.',
         retryAfter: Math.ceil((parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000) / 1000)
       });
     }
@@ -85,6 +115,7 @@ const rateLimitConfig = {
     },
     standardHeaders: true,
     legacyHeaders: false,
+    skip: () => isDev,
     handler: (req, res) => {
       logger.warn(`Upload rate limit exceeded for IP: ${req.ip}, Path: ${req.path}`);
       res.status(429).json({
@@ -106,6 +137,7 @@ const rateLimitConfig = {
     },
     standardHeaders: true,
     legacyHeaders: false,
+    skip: () => isDev,
     handler: (req, res) => {
       logger.warn(`Search rate limit exceeded for IP: ${req.ip}, Path: ${req.path}`);
       res.status(429).json({
@@ -132,6 +164,7 @@ const rateLimitConfig = {
       const userId = req.userId || 'anonymous';
       return `${req.ip}-${userId}`;
     },
+    skip: () => isDev,
     handler: (req, res) => {
       logger.warn(`Refresh rate limit exceeded for IP: ${req.ip}, User: ${req.userId || 'anonymous'}`);
       res.status(429).json({

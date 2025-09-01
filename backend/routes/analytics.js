@@ -241,6 +241,37 @@ router.get('/financial', authenticateToken, [
   const { period = '30' } = req.query;
   const days = parseInt(period);
 
+  // Load persisted admin overrides so values always show until re-updated by admin
+  const sellerId = req.userId;
+  let adminOverrides = {};
+  try {
+    const overridesResult = await executeQuery(
+      'SELECT metric_name, metric_period, period_specific_value, override_value FROM admin_overrides WHERE seller_id = ?',
+      [sellerId]
+    );
+    overridesResult.forEach(override => {
+      const periodKey = override.metric_period || 'total';
+      const value = override.period_specific_value ?? override.override_value;
+      if (!adminOverrides[periodKey]) adminOverrides[periodKey] = {};
+      adminOverrides[periodKey][override.metric_name] = { value };
+    });
+  } catch (e) {
+    logger.warn(`Failed to load admin overrides for seller ${sellerId}:`, e.message);
+  }
+  const overridePeriodKey = String(period) === '7'
+    ? 'last7days'
+    : (String(period) === '30' || String(period) === '90')
+      ? 'last30days'
+      : 'total';
+  const applyOverride = (base, metricName) => {
+    const bucket = adminOverrides[overridePeriodKey] || adminOverrides['total'];
+    if (bucket && bucket[metricName] && bucket[metricName].value !== undefined && bucket[metricName].value !== null) {
+      const v = parseFloat(bucket[metricName].value);
+      return Number.isNaN(v) ? base : v;
+    }
+    return base;
+  };
+
   let financialData;
   
   if (req.user.role === 'seller') {
@@ -256,6 +287,8 @@ router.get('/financial', authenticateToken, [
       GROUP BY DATE(o.created_at)
       ORDER BY date ASC
     `, [req.userId, days]);
+
+    // Note: Synthetic orders table removed - using only real orders data
   } else {
     // Admin financial analytics
     financialData = await executeQuery(`
@@ -387,7 +420,7 @@ router.get('/customers', authenticateToken, [
         MAX(o.created_at) as last_order_date
       FROM users c
       LEFT JOIN orders o ON c.id = o.customer_id AND o.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
-              WHERE c.role = 'seller'
+              WHERE c.role = 'seller' AND c.role != 'admin'
       GROUP BY c.id
       ORDER BY total_spent DESC
       LIMIT 10
@@ -401,7 +434,8 @@ router.get('/customers', authenticateToken, [
 }));
 
 // Record analytics event
-router.post('/record', authenticateToken, [
+// Only sellers can record analytics and seller metrics must use their own ID
+router.post('/record', authenticateToken, requireSeller, [
   body('entityType').notEmpty().withMessage('Entity type is required'),
   body('entityId').optional().isUUID().withMessage('Invalid entity ID'),
   body('metricPath').notEmpty().withMessage('Metric path is required'),
@@ -420,23 +454,31 @@ router.post('/record', authenticateToken, [
   const { entityType, entityId, metricPath, value = 0, increment = 1 } = req.body;
   const today = new Date().toISOString().split('T')[0];
 
+  // Enforce that seller analytics are always recorded against the authenticated seller
+  let effectiveEntityId = entityId;
+  if (entityType === 'seller') {
+    // Safety: requireSeller middleware guarantees seller role
+    // Always use the authenticated seller's ID to avoid saving under admin or arbitrary IDs
+    effectiveEntityId = req.userId;
+  }
+
   // Check if record exists for today
   const existingRecord = await executeQuery(
     'SELECT id FROM analytics WHERE entity_type = ? AND entity_id = ? AND metric_path = ? AND date = ?',
-    [entityType, entityId, metricPath, today]
+    [entityType, effectiveEntityId, metricPath, today]
   );
 
   if (existingRecord.length > 0) {
     // Update existing record
     await executeQuery(
       'UPDATE analytics SET value = value + ?, increment = increment + ?, updated_at = ? WHERE entity_type = ? AND entity_id = ? AND metric_path = ? AND date = ?',
-      [value, increment, new Date(), entityType, entityId, metricPath, today]
+      [value, increment, new Date(), entityType, effectiveEntityId, metricPath, today]
     );
   } else {
     // Create new record
     await executeQuery(
       'INSERT INTO analytics (id, entity_type, entity_id, metric_path, value, increment, date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [require('uuid').v4(), entityType, entityId, metricPath, value, increment, today, new Date()]
+      [require('uuid').v4(), entityType, effectiveEntityId, metricPath, value, increment, today, new Date()]
     );
   }
 
@@ -563,6 +605,19 @@ router.get('/seller', authenticateToken, requireAdminOrSeller, [
       WHERE u.id = ?
     `, [days, req.userId]);
 
+    // Guard: if no row is returned (e.g., seller not found), use zeroed defaults
+    const calcRow = (calculatedAnalytics && calculatedAnalytics.length > 0)
+      ? calculatedAnalytics[0]
+      : {
+          total_orders: 0,
+          total_revenue: 0,
+          average_order_value: 0,
+          completed_orders: 0,
+          cancelled_orders: 0,
+          total_products: 0,
+          active_products: 0
+        };
+
     // Prepare the final analytics response
     // Priority: Fake stats > Admin-edited analytics > Calculated analytics
     let finalAnalytics;
@@ -578,7 +633,7 @@ router.get('/seller', authenticateToken, requireAdminOrSeller, [
         shopFollowers: fakeStats.followers || 0,
         shopRating: fakeStats.rating || 0,
         creditScore: fakeStats.creditScore || 0,
-        averageOrderValue: calculatedAnalytics[0].average_order_value || 0,
+        averageOrderValue: calcRow.average_order_value || 0,
         conversionRate: 0,
         customerSatisfaction: fakeStats.rating || 0,
         monthlyGrowth: 0
@@ -591,20 +646,38 @@ router.get('/seller', authenticateToken, requireAdminOrSeller, [
     } else {
       // Use calculated analytics
       finalAnalytics = {
-        totalSales: calculatedAnalytics[0].total_revenue || 0,
-        totalOrders: calculatedAnalytics[0].total_orders || 0,
-        totalProducts: calculatedAnalytics[0].total_products || 0,
+        totalSales: calcRow.total_revenue || 0,
+        totalOrders: calcRow.total_orders || 0,
+        totalProducts: calcRow.total_products || 0,
         totalCustomers: 0,
         totalVisitors: 0,
         shopFollowers: 0,
         shopRating: 4.5,
         creditScore: 750,
-        averageOrderValue: calculatedAnalytics[0].average_order_value || 0,
+        averageOrderValue: calcRow.average_order_value || 0,
         conversionRate: 0,
         customerSatisfaction: 0,
         monthlyGrowth: 0
       };
       logger.info(`📊 Using calculated analytics for seller ${req.userId}`);
+    }
+
+    // Apply admin overrides to the final analytics snapshot so they persist visually
+    if (finalAnalytics) {
+      const mappings = [
+        ['totalOrders', 'orders_sold'],
+        ['totalSales', 'total_sales'],
+        ['totalCustomers', 'total_customers'],
+        ['totalVisitors', 'visitors'],
+        ['shopFollowers', 'shop_followers'],
+        ['shopRating', 'shop_rating'],
+        ['creditScore', 'credit_score']
+      ];
+      mappings.forEach(([field, metric]) => {
+        if (Object.prototype.hasOwnProperty.call(finalAnalytics, field)) {
+          finalAnalytics[field] = applyOverride(finalAnalytics[field], metric);
+        }
+      });
     }
 
     const response = {
@@ -613,9 +686,10 @@ router.get('/seller', authenticateToken, requireAdminOrSeller, [
         period: period,
         days: days,
         stats: finalAnalytics,
-        calculatedStats: calculatedAnalytics[0], // Include calculated stats for comparison
+        calculatedStats: calcRow, // Include calculated stats for comparison
         adminEdited: !!adminEditedAnalytics, // Flag indicating if admin-edited analytics exist
         fakeStats: !!fakeStats, // Flag indicating if fake stats exist
+        hasAdminOverrides: Object.keys(adminOverrides).length > 0,
         dataSource: fakeStats ? 'fake-stats-db' : (adminEditedAnalytics ? 'admin-edited-legacy' : 'calculated'),
         auditTrail: auditTrail || [], // Include audit trail if available
         source: adminEditedAnalytics ? 'admin-edited' : 'calculated'
@@ -649,17 +723,25 @@ router.get('/seller/dashboard', authenticateToken, requireAdminOrSeller, asyncHa
     const timeframes = ['today', '7days', '30days', 'total'];
     const dashboardData = {};
 
-    // Check for admin overrides first
+    // Check for admin overrides first - fetch all overrides for this seller
     let adminOverrides = {};
     try {
       const overridesResult = await executeQuery(
-        'SELECT metric_name, override_value FROM admin_overrides WHERE seller_id = ?',
+        'SELECT metric_name, metric_period, period_specific_value, override_value FROM admin_overrides WHERE seller_id = ?',
         [sellerId]
       );
       
+      // Group overrides by period and metric
       overridesResult.forEach(override => {
-        adminOverrides[override.metric_name] = {
-          value: override.override_value
+        const period = override.metric_period || 'total';
+        const value = override.period_specific_value || override.override_value;
+        
+        if (!adminOverrides[period]) {
+          adminOverrides[period] = {};
+        }
+        
+        adminOverrides[period][override.metric_name] = {
+          value: value
         };
       });
       
@@ -722,18 +804,35 @@ router.get('/seller/dashboard', authenticateToken, requireAdminOrSeller, asyncHa
           else if (timeframe === '30days') days = 30;
           else if (timeframe === 'total') days = 365; // Use 1 year for total
 
+          const timeCondOrders = timeframe === 'today'
+            ? 'AND DATE(o.created_at) = CURDATE()'
+            : timeframe === '7days'
+            ? 'AND o.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)'
+            : timeframe === '30days'
+            ? 'AND o.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)'
+            : 'AND o.created_at >= DATE_SUB(NOW(), INTERVAL 365 DAY)';
+
           const calculatedStats = await executeQuery(`
             SELECT 
-              COUNT(DISTINCT o.id) as total_orders,
-              COALESCE(SUM(o.total_amount), 0) as total_revenue,
-              COALESCE(AVG(o.total_amount), 0) as average_order_value,
-              COUNT(DISTINCT p.id) as total_products,
-              COUNT(CASE WHEN p.is_active = TRUE THEN 1 END) as active_products
-            FROM users u
-            LEFT JOIN orders o ON u.id = o.seller_id ${timeframe !== 'total' ? 'AND o.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)' : ''}
-            LEFT JOIN products p ON u.id = p.created_by
-            WHERE u.id = ?
-          `, timeframe !== 'total' ? [days, sellerId] : [sellerId]);
+              COALESCE(oagg.orders_count,0) as total_orders,
+              COALESCE(oagg.revenue,0) as total_revenue,
+              CASE WHEN COALESCE(oagg.orders_count,0) > 0 
+                   THEN COALESCE(oagg.revenue,0) / COALESCE(oagg.orders_count,0)
+                   ELSE 0 END as average_order_value,
+              COALESCE(pagg.total_products,0) as total_products,
+              COALESCE(pagg.active_products,0) as active_products
+            FROM (
+              SELECT COUNT(*) as orders_count, COALESCE(SUM(total_amount),0) as revenue
+              FROM orders o
+              WHERE o.seller_id = ? ${timeCondOrders}
+            ) oagg
+            CROSS JOIN (
+              SELECT COUNT(DISTINCT p.id) as total_products,
+                     COUNT(CASE WHEN p.is_active = TRUE THEN 1 END) as active_products
+              FROM products p
+              WHERE p.created_by = ?
+            ) pagg
+          `, [sellerId, sellerId]);
 
           dashboardData[timeframe] = {
             orders: calculatedStats[0].total_orders || 0,
@@ -771,20 +870,38 @@ router.get('/seller/dashboard', authenticateToken, requireAdminOrSeller, asyncHa
     // Also get overall stats for the dashboard
     const overallStats = await executeQuery(`
       SELECT 
-        COUNT(DISTINCT o.id) as total_orders,
-        COALESCE(SUM(o.total_amount), 0) as total_revenue,
-        COALESCE(AVG(o.total_amount), 0) as average_order_value,
-        COUNT(DISTINCT p.id) as total_products
-      FROM users u
-      LEFT JOIN orders o ON u.id = o.seller_id
-      LEFT JOIN products p ON u.id = p.created_by
-      WHERE u.id = ?
-    `, [sellerId]);
+        COALESCE(oagg.orders_count,0) as total_orders,
+        COALESCE(oagg.revenue,0) as total_revenue,
+        CASE WHEN COALESCE(oagg.orders_count,0) > 0 
+             THEN COALESCE(oagg.revenue,0) / COALESCE(oagg.orders_count,0)
+             ELSE 0 END as average_order_value,
+        COALESCE(pagg.total_products,0) as total_products
+      FROM (
+        SELECT COUNT(*) as orders_count, COALESCE(SUM(total_amount),0) as revenue
+        FROM orders o
+        WHERE o.seller_id = ?
+      ) oagg
+      CROSS JOIN (
+        SELECT COUNT(DISTINCT p.id) as total_products
+        FROM products p
+        WHERE p.created_by = ?
+      ) pagg
+    `, [sellerId, sellerId]);
 
-    // Apply admin overrides to the response
-    const applyOverrides = (data, metricName) => {
-      if (adminOverrides[metricName]) {
-        return parseFloat(adminOverrides[metricName].value);
+    // Guard: ensure we have a row to read from
+    const overallRow = (overallStats && overallStats.length > 0)
+      ? overallStats[0]
+      : {
+          total_orders: 0,
+          total_revenue: 0,
+          average_order_value: 0,
+          total_products: 0
+        };
+
+    // Helper function to apply admin overrides to any value
+    const applyOverrides = (data, metricName, period = 'total') => {
+      if (adminOverrides[period] && adminOverrides[period][metricName]) {
+        return parseFloat(adminOverrides[period][metricName].value);
       }
       return data;
     };
@@ -793,17 +910,22 @@ router.get('/seller/dashboard', authenticateToken, requireAdminOrSeller, asyncHa
     const applyTimeframeOverrides = (timeframeData, timeframe) => {
       if (!timeframeData) return timeframeData;
       
+      // Map timeframe to period key for overrides
+      const periodKey = timeframe === 'today' ? 'today' : 
+                       timeframe === '7days' ? 'last7days' : 
+                       timeframe === '30days' ? 'last30days' : 'total';
+      
       return {
         ...timeframeData,
-        orders: applyOverrides(timeframeData.orders, `${timeframe}Orders`),
-        sales: applyOverrides(timeframeData.sales, `${timeframe}Sales`),
-        revenue: applyOverrides(timeframeData.revenue, `${timeframe}Revenue`),
-        products: applyOverrides(timeframeData.products, `${timeframe}Products`),
-        customers: applyOverrides(timeframeData.customers, `${timeframe}Customers`),
-        visitors: applyOverrides(timeframeData.visitors, `${timeframe}Visitors`),
-        followers: applyOverrides(timeframeData.followers, `${timeframe}Followers`),
-        rating: applyOverrides(timeframeData.rating, `${timeframe}Rating`),
-        creditScore: applyOverrides(timeframeData.creditScore, `${timeframe}CreditScore`)
+        orders: applyOverrides(timeframeData.orders, 'orders_sold', periodKey),
+        sales: applyOverrides(timeframeData.sales, 'total_sales', periodKey),
+        revenue: applyOverrides(timeframeData.revenue, 'total_sales', periodKey),
+        products: timeframeData.products,
+        customers: applyOverrides(timeframeData.customers, 'total_customers', periodKey),
+        visitors: applyOverrides(timeframeData.visitors, 'visitors', periodKey),
+        followers: applyOverrides(timeframeData.followers, 'shop_followers', periodKey),
+        rating: applyOverrides(timeframeData.rating, 'shop_rating', periodKey),
+        creditScore: applyOverrides(timeframeData.creditScore, 'credit_score', periodKey)
       };
     };
 
@@ -811,19 +933,19 @@ router.get('/seller/dashboard', authenticateToken, requireAdminOrSeller, asyncHa
     const applyOverallOverrides = (overallData) => {
       return {
         ...overallData,
-        totalSales: applyOverrides(overallData.totalSales, 'total_sales'),
-        totalOrders: applyOverrides(overallData.totalOrders, 'orders_sold'),
+        totalSales: applyOverrides(overallData.totalSales, 'total_sales', 'total'),
+        totalOrders: applyOverrides(overallData.totalOrders, 'orders_sold', 'total'),
         totalProducts: overallData.totalProducts,
         averageOrderValue: overallData.averageOrderValue,
-        profitForecast: applyOverrides(0, 'profit_forecast'),
-        visitors: applyOverrides(0, 'visitors'),
-        followers: applyOverrides(0, 'shop_followers'),
-        rating: applyOverrides(4.5, 'shop_rating'),
-        creditScore: applyOverrides(750, 'credit_score')
+        profitForecast: applyOverrides(0, 'profit_forecast', 'total'),
+        visitors: applyOverrides(0, 'visitors', 'total'),
+        followers: applyOverrides(0, 'shop_followers', 'total'),
+        rating: applyOverrides(4.5, 'shop_rating', 'total'),
+        creditScore: applyOverrides(750, 'credit_score', 'total')
       };
     };
 
-    // Return the data in the structure the frontend expects
+    // Return the data in the structure the frontend expects with individual metric values
     const response = {
       error: false,
       // Return timeframes directly in root for easy access with overrides applied
@@ -832,27 +954,87 @@ router.get('/seller/dashboard', authenticateToken, requireAdminOrSeller, asyncHa
       '30days': applyTimeframeOverrides(dashboardData['30days'], '30days'),
       // Overall stats with overrides applied
       overall: applyOverallOverrides({
-        totalSales: overallStats[0].total_revenue || 0,
-        totalOrders: overallStats[0].total_orders || 0,
-        totalProducts: overallStats[0].total_products || 0,
-        averageOrderValue: overallStats[0].average_order_value || 0
+        totalSales: overallRow.total_revenue || 0,
+        totalOrders: overallRow.total_orders || 0,
+        totalProducts: overallRow.total_products || 0,
+        averageOrderValue: overallRow.average_order_value || 0
       }),
       // Core metrics that can be overridden (mapped to frontend expectations)
       total: {
-        orders: applyOverrides(overallStats[0].total_orders || 0, 'orders_sold'),
-        sales: applyOverrides(overallStats[0].total_revenue || 0, 'total_sales'),
-        revenue: applyOverrides(overallStats[0].total_revenue || 0, 'total_sales'),
-        products: overallStats[0].total_products || 0,
-        customers: 0,
-        visitors: applyOverrides(0, 'visitors'),
-        followers: applyOverrides(0, 'shop_followers'),
-        rating: applyOverrides(4.5, 'shop_rating'),
-        creditScore: applyOverrides(750, 'credit_score')
+        orders: applyOverrides(overallRow.total_orders || 0, 'orders_sold', 'total'),
+        sales: applyOverrides(overallRow.total_revenue || 0, 'total_sales', 'total'),
+        revenue: applyOverrides(overallRow.total_revenue || 0, 'total_sales', 'total'),
+        products: overallRow.total_products || 0,
+        customers: applyOverrides(0, 'total_customers', 'total'),
+        visitors: applyOverrides(0, 'visitors', 'total'),
+        followers: applyOverrides(0, 'shop_followers', 'total'),
+        rating: applyOverrides(4.5, 'shop_rating', 'total'),
+        creditScore: applyOverrides(750, 'credit_score', 'total')
       },
-      // Metadata
+      // Individual metric values for each period (for frontend to use directly)
+      metrics: {
+        orders_sold: {
+          today: applyOverrides(dashboardData.today?.orders || 0, 'orders_sold', 'today'),
+          last7days: applyOverrides(dashboardData['7days']?.orders || 0, 'orders_sold', 'last7days'),
+          last30days: applyOverrides(dashboardData['30days']?.orders || 0, 'orders_sold', 'last30days'),
+          total: applyOverrides(overallRow.total_orders || 0, 'orders_sold', 'total')
+        },
+        total_sales: {
+          today: applyOverrides(dashboardData.today?.sales || 0, 'total_sales', 'today'),
+          last7days: applyOverrides(dashboardData['7days']?.sales || 0, 'total_sales', 'last7days'),
+          last30days: applyOverrides(dashboardData['30days']?.sales || 0, 'total_sales', 'last30days'),
+          total: applyOverrides(overallRow.total_revenue || 0, 'total_sales', 'total')
+        },
+        profit_forecast: {
+          today: applyOverrides(0, 'profit_forecast', 'today'),
+          last7days: applyOverrides(0, 'profit_forecast', 'last7days'),
+          last30days: applyOverrides(0, 'profit_forecast', 'last30days'),
+          total: applyOverrides(0, 'profit_forecast', 'total')
+        },
+        visitors: {
+          today: applyOverrides(dashboardData.today?.visitors || 0, 'visitors', 'today'),
+          last7days: applyOverrides(dashboardData['7days']?.visitors || 0, 'visitors', 'last7days'),
+          last30days: applyOverrides(dashboardData['30days']?.visitors || 0, 'visitors', 'last30days'),
+          total: applyOverrides(0, 'visitors', 'total')
+        },
+        shop_followers: {
+          today: applyOverrides(dashboardData.today?.followers || 0, 'shop_followers', 'today'),
+          last7days: applyOverrides(dashboardData['7days']?.followers || 0, 'shop_followers', 'last7days'),
+          last30days: applyOverrides(dashboardData['30days']?.followers || 0, 'shop_followers', 'last30days'),
+          total: applyOverrides(0, 'shop_followers', 'total')
+        },
+        shop_rating: {
+          today: applyOverrides(dashboardData.today?.rating || 0, 'shop_rating', 'today'),
+          last7days: applyOverrides(dashboardData['7days']?.rating || 0, 'shop_rating', 'last7days'),
+          last30days: applyOverrides(dashboardData['30days']?.rating || 0, 'shop_rating', 'last30days'),
+          total: applyOverrides(4.5, 'shop_rating', 'total')
+        },
+        credit_score: {
+          today: applyOverrides(dashboardData.today?.creditScore || 0, 'credit_score', 'today'),
+          last7days: applyOverrides(dashboardData['7days']?.creditScore || 0, 'credit_score', 'last7days'),
+          last30days: applyOverrides(dashboardData['30days']?.creditScore || 0, 'credit_score', 'last30days'),
+          total: applyOverrides(750, 'credit_score', 'total')
+        },
+        total_customers: {
+          today: applyOverrides(dashboardData.today?.customers || 0, 'total_customers', 'today'),
+          last7days: applyOverrides(dashboardData['7days']?.customers || 0, 'total_customers', 'last7days'),
+          last30days: applyOverrides(dashboardData['30days']?.customers || 0, 'total_customers', 'last30days'),
+          total: applyOverrides(0, 'total_customers', 'total')
+        }
+      },
+      // Enhanced metadata with override information
       hasFakeData: Object.values(dashboardData).some(tf => tf.hasFakeData),
       hasAdminOverrides: Object.keys(adminOverrides).length > 0,
       adminOverrides: Object.keys(adminOverrides).length > 0 ? adminOverrides : undefined,
+      overrideSummary: {
+        totalOverrides: Object.keys(adminOverrides).length,
+        periodsWithOverrides: Object.keys(adminOverrides).filter(period => 
+          Object.keys(adminOverrides[period]).length > 0
+        ),
+        metricsWithOverrides: Object.keys(adminOverrides).flatMap(period => 
+          Object.keys(adminOverrides[period])
+        ).filter((metric, index, arr) => arr.indexOf(metric) === index)
+      },
       timestamp: new Date().toISOString()
     };
 
@@ -880,7 +1062,7 @@ router.get('/seller/dashboard/:sellerId', authenticateToken, requireAdminOrSelle
     
     // Validate seller exists
     const seller = await executeQuery(
-      'SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller"',
+      'SELECT id, full_name, email, role FROM users WHERE id = ? AND role = "seller" AND role != "admin"',
       [sellerId]
     );
 
@@ -895,14 +1077,17 @@ router.get('/seller/dashboard/:sellerId', authenticateToken, requireAdminOrSelle
     let adminOverrides = {};
     try {
       const overridesResult = await executeQuery(
-        'SELECT metric_name, override_value FROM admin_overrides WHERE seller_id = ?',
+        'SELECT metric_name, metric_period, period_specific_value, override_value FROM admin_overrides WHERE seller_id = ?',
         [sellerId]
       );
       
       overridesResult.forEach(override => {
-        adminOverrides[override.metric_name] = {
-          value: override.override_value
-        };
+        const period = override.metric_period || 'total';
+        const value = override.period_specific_value ?? override.override_value;
+        if (!adminOverrides[period]) {
+          adminOverrides[period] = {};
+        }
+        adminOverrides[period][override.metric_name] = { value };
       });
       
       if (Object.keys(adminOverrides).length > 0) {
@@ -932,32 +1117,38 @@ router.get('/seller/dashboard/:sellerId', authenticateToken, requireAdminOrSelle
 
     const todayStats = await executeQuery(`
       SELECT 
-        COUNT(DISTINCT o.id) as orders,
-        COALESCE(SUM(o.total_amount), 0) as sales
-      FROM orders o 
-      WHERE o.seller_id = ? AND DATE(o.created_at) = CURDATE()
+        COALESCE(oagg.cnt,0) as orders,
+        COALESCE(oagg.sum_amt,0) as sales
+      FROM (
+        SELECT COUNT(*) as cnt, COALESCE(SUM(total_amount),0) as sum_amt
+        FROM orders WHERE seller_id = ? AND DATE(created_at) = CURDATE()
+      ) oagg
     `, [sellerId]);
 
     const last7DaysStats = await executeQuery(`
       SELECT 
-        COUNT(DISTINCT o.id) as orders,
-        COALESCE(SUM(o.total_amount), 0) as sales
-      FROM orders o 
-      WHERE o.seller_id = ? AND o.created_at >= ?
+        COALESCE(oagg.cnt,0) as orders,
+        COALESCE(oagg.sum_amt,0) as sales
+      FROM (
+        SELECT COUNT(*) as cnt, COALESCE(SUM(total_amount),0) as sum_amt
+        FROM orders WHERE seller_id = ? AND created_at >= ?
+      ) oagg
     `, [sellerId, last7Days]);
 
     const last30DaysStats = await executeQuery(`
       SELECT 
-        COUNT(DISTINCT o.id) as orders,
-        COALESCE(SUM(o.total_amount), 0) as sales
-      FROM orders o 
-      WHERE o.seller_id = ? AND o.created_at >= ?
+        COALESCE(oagg.cnt,0) as orders,
+        COALESCE(oagg.sum_amt,0) as sales
+      FROM (
+        SELECT COUNT(*) as cnt, COALESCE(SUM(total_amount),0) as sum_amt
+        FROM orders WHERE seller_id = ? AND created_at >= ?
+      ) oagg
     `, [sellerId, last30Days]);
 
     // Apply admin overrides to the response
-    const applyOverrides = (data, metricName) => {
-      if (adminOverrides[metricName]) {
-        return parseFloat(adminOverrides[metricName].value);
+    const applyOverrides = (data, metricName, period = 'total') => {
+      if (adminOverrides[period] && adminOverrides[period][metricName]) {
+        return parseFloat(adminOverrides[period][metricName].value);
       }
       return data;
     };
@@ -969,33 +1160,33 @@ router.get('/seller/dashboard/:sellerId', authenticateToken, requireAdminOrSelle
       hasAdminOverrides: Object.keys(adminOverrides).length > 0,
       adminOverrides: Object.keys(adminOverrides).length > 0 ? adminOverrides : undefined,
       overall: {
-        totalSales: applyOverrides(overallStats[0]?.total_revenue || 0, 'total_sales'),
-        totalOrders: applyOverrides(overallStats[0]?.total_orders || 0, 'orders_sold'),
+        totalSales: applyOverrides(overallStats[0]?.total_revenue || 0, 'total_sales', 'total'),
+        totalOrders: applyOverrides(overallStats[0]?.total_orders || 0, 'orders_sold', 'total'),
         totalProducts: overallStats[0]?.total_products || 0,
         averageOrderValue: overallStats[0]?.average_order_value || 0
       },
       today: {
-        sales: applyOverrides(todayStats[0]?.sales || 0, 'total_sales'),
-        orders: applyOverrides(todayStats[0]?.orders || 0, 'orders_sold')
+        sales: applyOverrides(todayStats[0]?.sales || 0, 'total_sales', 'today'),
+        orders: applyOverrides(todayStats[0]?.orders || 0, 'orders_sold', 'today')
       },
       '7days': {
-        sales: applyOverrides(last7DaysStats[0]?.sales || 0, 'total_sales'),
-        orders: applyOverrides(last7DaysStats[0]?.orders || 0, 'orders_sold')
+        sales: applyOverrides(last7DaysStats[0]?.sales || 0, 'total_sales', 'last7days'),
+        orders: applyOverrides(last7DaysStats[0]?.orders || 0, 'orders_sold', 'last7days')
       },
       '30days': {
-        sales: applyOverrides(last30DaysStats[0]?.sales || 0, 'total_sales'),
-        orders: applyOverrides(last30DaysStats[0]?.orders || 0, 'orders_sold')
+        sales: applyOverrides(last30DaysStats[0]?.sales || 0, 'total_sales', 'last30days'),
+        orders: applyOverrides(last30DaysStats[0]?.orders || 0, 'orders_sold', 'last30days')
       },
       total: {
-        orders: applyOverrides(overallStats[0]?.total_orders || 0, 'orders_sold'),
-        sales: applyOverrides(overallStats[0]?.total_revenue || 0, 'total_sales'),
-        revenue: applyOverrides(overallStats[0]?.total_revenue || 0, 'total_sales'),
+        orders: applyOverrides(overallStats[0]?.total_orders || 0, 'orders_sold', 'total'),
+        sales: applyOverrides(overallStats[0]?.total_revenue || 0, 'total_sales', 'total'),
+        revenue: applyOverrides(overallStats[0]?.total_revenue || 0, 'total_sales', 'total'),
         products: overallStats[0]?.total_products || 0,
         customers: 0,
-        visitors: applyOverrides(0, 'visitors'),
-        followers: applyOverrides(0, 'shop_followers'),
-        rating: applyOverrides(4.5, 'shop_rating'),
-        creditScore: applyOverrides(750, 'credit_score')
+        visitors: applyOverrides(0, 'visitors', 'total'),
+        followers: applyOverrides(0, 'shop_followers', 'total'),
+        rating: applyOverrides(4.5, 'shop_rating', 'total'),
+        creditScore: applyOverrides(750, 'credit_score', 'total')
       },
       timestamp: new Date().toISOString()
     };

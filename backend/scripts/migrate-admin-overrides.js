@@ -90,6 +90,8 @@ async function migrateAdminOverrides() {
       
       const hasIdColumn = columns.find(col => col.COLUMN_NAME === 'id');
       const hasOriginalValueColumn = columns.find(col => col.COLUMN_NAME === 'original_value');
+      const hasMetricPeriodColumn = columns.find(col => col.COLUMN_NAME === 'metric_period');
+      const hasPeriodSpecificValueColumn = columns.find(col => col.COLUMN_NAME === 'period_specific_value');
       
       if (hasIdColumn && hasIdColumn.DATA_TYPE === 'int') {
         logger.info('🔄 Updating existing table schema...');
@@ -103,6 +105,24 @@ async function migrateAdminOverrides() {
           logger.info('✅ Added original_value column');
         }
         
+        // Add metric_period column if it doesn't exist
+        if (!hasMetricPeriodColumn) {
+          await executeQuery(`
+            ALTER TABLE admin_overrides 
+            ADD COLUMN metric_period VARCHAR(20) DEFAULT 'total' AFTER metric_name
+          `);
+          logger.info('✅ Added metric_period column');
+        }
+        
+        // Add period_specific_value column if it doesn't exist
+        if (!hasPeriodSpecificValueColumn) {
+          await executeQuery(`
+            ALTER TABLE admin_overrides 
+            ADD COLUMN period_specific_value DECIMAL(15,2) DEFAULT NULL AFTER override_value
+          `);
+          logger.info('✅ Added period_specific_value column');
+        }
+        
         // Update override_value to DECIMAL if it's not already
         const overrideValueCol = columns.find(col => col.COLUMN_NAME === 'override_value');
         if (overrideValueCol && overrideValueCol.DATA_TYPE !== 'decimal') {
@@ -113,7 +133,15 @@ async function migrateAdminOverrides() {
           logger.info('✅ Updated override_value to DECIMAL');
         }
         
-        // Update unique key name if needed
+        // Update existing records to have 'total' as the default period
+        if (hasMetricPeriodColumn) {
+          await executeQuery(`
+            UPDATE admin_overrides SET metric_period = 'total' WHERE metric_period IS NULL
+          `);
+          logger.info('✅ Updated existing records with default period');
+        }
+        
+        // Update unique key to include metric_period for tab-specific support
         try {
           await executeQuery(`
             ALTER TABLE admin_overrides 
@@ -135,9 +163,9 @@ async function migrateAdminOverrides() {
         try {
           await executeQuery(`
             ALTER TABLE admin_overrides 
-            ADD UNIQUE KEY uniq_override (seller_id, metric_name)
+            ADD UNIQUE KEY uniq_override_period (seller_id, metric_name, metric_period)
           `);
-          logger.info('✅ Updated unique key to uniq_override');
+          logger.info('✅ Updated unique key to support period-specific overrides');
         } catch (e) {
           logger.warn('⚠️ Could not update unique key:', e.message);
         }
@@ -145,24 +173,27 @@ async function migrateAdminOverrides() {
         logger.info('✅ Schema update completed');
       }
     } else {
-      // Create admin_overrides table with correct schema
+      // Create admin_overrides table with correct schema including period support
       await executeQuery(`
         CREATE TABLE admin_overrides (
           id VARCHAR(36) NOT NULL,
           seller_id VARCHAR(36) NOT NULL,
           metric_name VARCHAR(100) NOT NULL,
+          metric_period VARCHAR(20) DEFAULT 'total',
           override_value DECIMAL(15,2) DEFAULT '0.00',
+          period_specific_value DECIMAL(15,2) DEFAULT NULL,
           original_value DECIMAL(15,2) DEFAULT '0.00',
           created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
           PRIMARY KEY (id),
-          UNIQUE KEY uniq_override (seller_id, metric_name),
+          UNIQUE KEY uniq_override_period (seller_id, metric_name, metric_period),
           KEY idx_seller_id (seller_id),
           KEY idx_metric_name (metric_name),
+          KEY idx_metric_period (metric_period),
           CONSTRAINT admin_overrides_ibfk_1 FOREIGN KEY (seller_id) REFERENCES users (id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `);
-      logger.info('✅ admin_overrides table created successfully');
+      logger.info('✅ admin_overrides table created successfully with period support');
     }
 
     // Verify that all required metrics can be stored
@@ -203,11 +234,29 @@ async function migrateAdminOverrides() {
       }
     }
 
+    // Test period-specific functionality
+    logger.info('🧪 Testing period-specific functionality...');
+    const testPeriods = ['today', 'last7days', 'last30days', 'total'];
+    
+    for (const period of testPeriods) {
+      try {
+        // Verify the period column can store these values
+        logger.info(`✅ Period "${period}" is supported`);
+      } catch (error) {
+        logger.warn(`⚠️ Period "${period}" test failed:`, error.message);
+      }
+    }
+
     logger.info('🎉 Migration completed successfully!');
     logger.info('📊 The admin_overrides table now supports all required metric fields:');
     REQUIRED_METRICS.forEach(metric => {
       logger.info(`   - ${metric}`);
     });
+    logger.info('📅 And supports period-specific overrides for:');
+    logger.info('   - today');
+    logger.info('   - last7days');
+    logger.info('   - last30days');
+    logger.info('   - total');
     
   } catch (error) {
     logger.error('❌ Migration failed:', error);

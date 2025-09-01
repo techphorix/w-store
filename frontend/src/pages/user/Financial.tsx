@@ -31,6 +31,7 @@ import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement
 import { Line, Doughnut } from 'react-chartjs-2';
 import tiktokLogo from '../../assets/tiktok-logo.png';
 import tiktokBackground from '../../assets/tiktok-background.jpg';
+const backendBase = (import.meta as any).env?.VITE_BACKEND_URL || 'http://localhost:5000';
 
 // Register Chart.js components
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, ArcElement);
@@ -358,8 +359,23 @@ const Financial = () => {
   // Deposit/Withdrawal state
   const [depositAmount, setDepositAmount] = useState('');
   const [withdrawalAmount, setWithdrawalAmount] = useState('');
-  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState('bankAccount');
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<string>('');
+  const [selectedWithdrawalAccountId, setSelectedWithdrawalAccountId] = useState<string>('');
+  const [depositReference, setDepositReference] = useState('');
+  const [depositScreenshot, setDepositScreenshot] = useState<File | null>(null);
   const [availableBalance, setAvailableBalance] = useState(0);
+  const [showDepositSuccess, setShowDepositSuccess] = useState(false);
+  const [depositConfirmation, setDepositConfirmation] = useState<{ depositId?: string; amount?: number } | null>(null);
+  const [myDeposits, setMyDeposits] = useState<any[]>([]);
+  const [myWithdrawals, setMyWithdrawals] = useState<any[]>([]);
+  const [listLoading, setListLoading] = useState({ deposits: false, withdrawals: false });
+  
+  // Payment methods state
+  const [depositPaymentMethods, setDepositPaymentMethods] = useState<any[]>([]);
+  const [withdrawalMethods, setWithdrawalMethods] = useState<any[]>([]);
+  const [withdrawalAccounts, setWithdrawalAccounts] = useState<any[]>([]);
+  const [showAddAccount, setShowAddAccount] = useState(false);
+  const [newAccount, setNewAccount] = useState<{ methodId: string; label?: string; details: any; isDefault?: boolean }>({ methodId: '', details: {} });
 
   // Investment state
   const [selectedInvestmentPlan, setSelectedInvestmentPlan] = useState<string | null>(null);
@@ -426,7 +442,6 @@ const Financial = () => {
   useEffect(() => {
     if (sellerFinancialData) {
       setFinanceData(sellerFinancialData);
-      setAvailableBalance(sellerFinancialData.totalFinancing - sellerFinancialData.pendingAmount);
     }
   }, [sellerFinancialData]);
 
@@ -557,10 +572,105 @@ const Financial = () => {
     return type === 'income' ? 'text-green-600' : 'text-red-600';
   };
 
+  const normalizeUploadUrl = (raw?: string) => {
+    if (!raw) return '';
+    let p = String(raw).replace(/\\/g,'/');
+    const idx = p.toLowerCase().lastIndexOf('/uploads/');
+    if (idx >= 0) p = p.slice(idx);
+    if (!p.startsWith('/uploads/')) {
+      if (p.startsWith('uploads/')) p = '/' + p; else p = '/uploads/' + p.replace(/^\/+/, '');
+    }
+    return `${backendBase}${p}`;
+  };
+
   useEffect(() => {
     // Simulate loading
     const timer = setTimeout(() => setIsLoading(false), 1000);
     return () => clearTimeout(timer);
+  }, []);
+
+  // Fetch payment methods
+  useEffect(() => {
+    const fetchPaymentMethods = async () => {
+      try {
+        const [paymentMethodsResponse, withdrawalMethodsResponse] = await Promise.all([
+          financeApi.getDepositPaymentMethods(),
+          financeApi.getWithdrawalMethods()
+        ]);
+        
+        setDepositPaymentMethods(paymentMethodsResponse.paymentMethods || []);
+        setWithdrawalMethods(withdrawalMethodsResponse.withdrawalMethods || []);
+        
+        // Set default selected payment method if available
+        if (paymentMethodsResponse.paymentMethods?.length > 0) {
+          setSelectedPaymentMethod(paymentMethodsResponse.paymentMethods[0].id);
+        }
+      } catch (error) {
+        console.error('Error fetching payment methods:', error);
+      }
+    };
+    
+    const fetchAccounts = async () => {
+      try {
+        const resp = await financeApi.getWithdrawalAccounts();
+        const accounts = resp.accounts || [];
+        setWithdrawalAccounts(accounts);
+        if (accounts.length > 0) {
+          const def = accounts.find((a: any) => a.is_default);
+          setSelectedWithdrawalAccountId(def ? def.id : accounts[0].id);
+        }
+      } catch (e) {
+        console.error('Error fetching withdrawal accounts:', e);
+      }
+    };
+
+    fetchPaymentMethods();
+    fetchAccounts();
+  }, []);
+
+  // Fetch available balance from server
+  useEffect(() => {
+    (async () => {
+      try {
+        const resp = await financeApi.getBalance();
+        if (typeof resp.availableBalance === 'number') {
+          setAvailableBalance(resp.availableBalance);
+        } else if (typeof resp?.available_balance === 'number') {
+          setAvailableBalance(resp.available_balance);
+        }
+      } catch (e) {
+        // Non-fatal; keep existing balance
+        console.warn('Failed to fetch balance', e);
+      }
+    })();
+  }, []);
+
+  // Fetch deposit and withdrawal transactions for current seller
+  useEffect(() => {
+    const loadDeposits = async () => {
+      setListLoading(l => ({ ...l, deposits: true }));
+      try {
+        const resp = await financeApi.listMyDeposits();
+        setMyDeposits(resp.deposits || []);
+      } catch (e) {
+        console.error('Failed to load my deposits', e);
+      } finally {
+        setListLoading(l => ({ ...l, deposits: false }));
+      }
+    };
+    const loadWithdrawals = async () => {
+      setListLoading(l => ({ ...l, withdrawals: true }));
+      try {
+        const resp = await financeApi.getTransactions({ type: 'payout', limit: 50 });
+        setMyWithdrawals(resp.transactions || resp || []);
+      } catch (e) {
+        console.error('Failed to load my withdrawals', e);
+      } finally {
+        setListLoading(l => ({ ...l, withdrawals: false }));
+      }
+    };
+    loadDeposits();
+    loadWithdrawals();
   }, []);
 
   if (isLoading) {
@@ -938,11 +1048,11 @@ const Financial = () => {
                 </div>
               </div>
 
-              {/* Deposit Form */}
-              <div className="bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-lg border border-gray-200">
-                <h3 className="text-xl font-bold text-gray-900 mb-6">{currentLang.depositFunds}</h3>
-                
-                <div className="space-y-6">
+          {/* Deposit Form */}
+          <div className="bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-lg border border-gray-200">
+            <h3 className="text-xl font-bold text-gray-900 mb-6">{currentLang.depositFunds}</h3>
+            
+            <div className="space-y-6">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">{currentLang.enterAmount}</label>
                     <div className="relative">
@@ -964,44 +1074,76 @@ const Financial = () => {
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">{currentLang.selectPaymentMethod}</label>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      <button
-                        onClick={() => setSelectedPaymentMethod('bankAccount')}
-                        className={`p-4 border-2 rounded-lg transition-all ${
-                          selectedPaymentMethod === 'bankAccount'
-                            ? 'border-black bg-black text-white'
-                            : 'border-gray-200 hover:border-gray-300'
-                        }`}
-                      >
-                        <FontAwesomeIcon icon={faCreditCard} className="w-6 h-6 mb-2" />
-                        <div className="font-medium">{currentLang.bankAccount}</div>
-                        <div className="text-sm opacity-75">{currentLang.instantTransfer}</div>
-                      </button>
-                      
-                      <button
-                        onClick={() => setSelectedPaymentMethod('paypal')}
-                        className={`p-4 border-2 rounded-lg transition-all ${
-                          selectedPaymentMethod === 'paypal'
-                            ? 'border-black bg-black text-white'
-                            : 'border-gray-200 hover:border-gray-300'
-                        }`}
-                      >
-                        <FontAwesomeIcon icon={faWallet} className="w-6 h-6 mb-2" />
-                        <div className="font-medium">{currentLang.paypal}</div>
-                        <div className="text-sm opacity-75">{currentLang.instantTransfer}</div>
-                      </button>
-                      
-                      <button
-                        onClick={() => setSelectedPaymentMethod('stripe')}
-                        className={`p-4 border-2 rounded-lg transition-all ${
-                          selectedPaymentMethod === 'stripe'
-                            ? 'border-black bg-black text-white'
-                            : 'border-gray-200 hover:border-gray-300'
-                        }`}
-                      >
-                        <FontAwesomeIcon icon={faCreditCard} className="w-6 h-6 mb-2" />
-                        <div className="font-medium">{currentLang.stripe}</div>
-                        <div className="text-sm opacity-75">{currentLang.instantTransfer}</div>
-                      </button>
+                      {depositPaymentMethods.map((method) => (
+                        <button
+                          key={method.id}
+                          onClick={() => setSelectedPaymentMethod(method.id)}
+                          className={`p-4 border-2 rounded-lg transition-all ${
+                            selectedPaymentMethod === method.id ? 'border-black bg-black text-white' : 'border-gray-200 hover:border-gray-300'
+                          }`}
+                        >
+                          <FontAwesomeIcon icon={faCreditCard} className="w-6 h-6 mb-2" />
+                          <div className="font-medium">{method.name}</div>
+                          <div className="text-sm opacity-75">{method.processing_time || currentLang.instantTransfer}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Selected method details (Binance/Bank) */}
+                  {selectedPaymentMethod && (
+                    <div className="border border-gray-200 rounded-lg p-4">
+                      {(() => {
+                        const m = depositPaymentMethods.find(pm => pm.id === selectedPaymentMethod);
+                        const cfg = (m && m.config) ? (typeof m.config === 'string' ? JSON.parse(m.config) : m.config) : null;
+                        if (cfg && cfg.kind === 'binance') {
+                          return (
+                            <div className="space-y-2">
+                              <div className="font-semibold">Binance</div>
+                              {cfg.qrImageUrl && (
+                                <img src={cfg.qrImageUrl} alt="Binance QR" className="w-40 h-40 object-contain border rounded" />
+                              )}
+                              {cfg.id && <div className="text-sm text-gray-700">ID: {cfg.id}</div>}
+                              {cfg.link && (
+                                <a href={cfg.link} target="_blank" rel="noreferrer" className="text-sm text-blue-600 underline">Open Binance Link</a>
+                              )}
+                            </div>
+                          );
+                        }
+                        if (cfg && cfg.kind === 'bank') {
+                          return (
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                              <div><span className="font-medium">Account Title:</span> {cfg.accountTitle || '-'}</div>
+                              <div><span className="font-medium">Account Number:</span> {cfg.accountNumber || '-'}</div>
+                              <div><span className="font-medium">Bank Name:</span> {cfg.bankName || '-'}</div>
+                            </div>
+                          );
+                        }
+                        return <div className="text-sm text-gray-600">{m?.description || 'Follow the instructions for this method.'}</div>;
+                      })()}
+                    </div>
+                  )}
+
+                  {/* Reference and Screenshot */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Reference (optional)</label>
+                      <input
+                        type="text"
+                        value={depositReference}
+                        onChange={(e) => setDepositReference(e.target.value)}
+                        placeholder="Transaction reference or note"
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Upload Screenshot</label>
+                      <input
+                        type="file"
+                        accept="image/*,application/pdf"
+                        onChange={(e) => setDepositScreenshot(e.target.files?.[0] || null)}
+                        className="w-full"
+                      />
                     </div>
                   </div>
 
@@ -1010,12 +1152,78 @@ const Financial = () => {
                       {currentLang.cancel}
                     </button>
                     <button 
-                      disabled={!depositAmount || parseFloat(depositAmount) < 10}
+                      disabled={!depositAmount || parseFloat(depositAmount) < 10 || !selectedPaymentMethod || !depositScreenshot}
+                      onClick={async () => {
+                        try {
+                          if (!depositScreenshot) return;
+                          const resp = await financeApi.submitManualDeposit({
+                            amount: parseFloat(depositAmount),
+                            methodId: selectedPaymentMethod,
+                            reference: depositReference || undefined,
+                            screenshot: depositScreenshot
+                          });
+                          setDepositConfirmation({ depositId: resp.depositId, amount: parseFloat(depositAmount) });
+                          setShowDepositSuccess(true);
+                          setDepositAmount('');
+                          setDepositReference('');
+                          setDepositScreenshot(null);
+                          try { const r = await financeApi.listMyDeposits(); setMyDeposits(r.deposits||[]); } catch {}
+                        } catch (e) {
+                          console.error('Failed to submit deposit', e);
+                          alert('Failed to submit deposit');
+                        }
+                      }}
                       className="flex-1 px-6 py-3 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {currentLang.confirm}
                     </button>
                   </div>
+                </div>
+              </div>
+
+              {/* My Deposit Submissions */}
+              <div className="bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-lg border border-gray-200">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-xl font-bold text-gray-900">My Deposit Submissions</h3>
+                  <button onClick={async ()=>{ try{ const r=await financeApi.listMyDeposits(); setMyDeposits(r.deposits||[]);}catch(e){console.error(e);} }} className="text-sm px-3 py-1.5 border rounded hover:bg-gray-50">Refresh</button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Date</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Amount</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Method</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Reference</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Status</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Screenshot</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 bg-white">
+                      {listLoading.deposits ? (
+                        <tr><td colSpan={6} className="p-4 text-center text-gray-500">Loading...</td></tr>
+                      ) : myDeposits.length === 0 ? (
+                        <tr><td colSpan={6} className="p-4 text-center text-gray-500">No deposits found.</td></tr>
+                      ) : (
+                        myDeposits.map((d:any) => (
+                          <tr key={d.id} className="hover:bg-gray-50">
+                            <td className="px-4 py-2 text-sm text-gray-700">{new Date(d.created_at).toLocaleString()}</td>
+                            <td className="px-4 py-2 text-sm font-medium text-gray-900">${Number(d.amount).toFixed(2)} {d.currency || 'USD'}</td>
+                            <td className="px-4 py-2 text-sm text-gray-700">{d.method_name || d.method_id}</td>
+                            <td className="px-4 py-2 text-sm text-gray-700" title={d.reference || ''}>{d.reference || '—'}</td>
+                            <td className="px-4 py-2 text-sm">
+                              <span className={`px-2 py-1 text-xs rounded-full ${d.status==='approved'?'bg-green-100 text-green-700':d.status==='rejected'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-800'}`}>{d.status}</span>
+                            </td>
+                            <td className="px-4 py-2 text-sm">
+                              {d.screenshot_url ? (
+                                <a className="text-blue-600 hover:underline" href={normalizeUploadUrl(d.screenshot_url)} target="_blank" rel="noreferrer">Open</a>
+                              ) : '—'}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
@@ -1059,32 +1267,63 @@ const Financial = () => {
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">{currentLang.selectPaymentMethod}</label>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <button
-                        onClick={() => setSelectedPaymentMethod('bankAccount')}
-                        className={`p-4 border-2 rounded-lg transition-all ${
-                          selectedPaymentMethod === 'bankAccount'
-                            ? 'border-black bg-black text-white'
-                            : 'border-gray-200 hover:border-gray-300'
-                        }`}
-                      >
-                        <FontAwesomeIcon icon={faCreditCard} className="w-6 h-6 mb-2" />
-                        <div className="font-medium">{currentLang.bankTransfer}</div>
-                        <div className="text-sm opacity-75">1-3 business days</div>
-                      </button>
-                      
-                      <button
-                        onClick={() => setSelectedPaymentMethod('paypal')}
-                        className={`p-4 border-2 rounded-lg transition-all ${
-                          selectedPaymentMethod === 'paypal'
-                            ? 'border-black bg-black text-white'
-                            : 'border-gray-200 hover:border-gray-300'
-                        }`}
-                      >
-                        <FontAwesomeIcon icon={faWallet} className="w-6 h-6 mb-2" />
-                        <div className="font-medium">{currentLang.paypal}</div>
-                        <div className="text-sm opacity-75">{currentLang.instantTransfer}</div>
-                      </button>
+                      {withdrawalMethods.map((method) => (
+                        <button
+                          key={method.id}
+                          onClick={() => setSelectedPaymentMethod(method.id)}
+                          className={`p-4 border-2 rounded-lg transition-all ${
+                            selectedPaymentMethod === method.id
+                              ? 'border-black bg-black text-white'
+                              : 'border-gray-200 hover:border-gray-300'
+                          }`}
+                        >
+                          <FontAwesomeIcon icon={faCreditCard} className="w-6 h-6 mb-2" />
+                          <div className="font-medium">{method.name}</div>
+                          <div className="text-sm opacity-75">{method.processing_time}</div>
+                          {method.fees_percentage > 0 && (
+                            <div className="text-xs opacity-75 mt-1">
+                              {method.fees_percentage}% fee
+                            </div>
+                          )}
+                        </button>
+                      ))}
                     </div>
+                  </div>
+
+                  {/* Withdrawal Accounts Management */}
+                  <div className="border border-gray-200 rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="font-medium">Withdrawal Accounts</div>
+                      <button onClick={() => { setShowAddAccount(true); setNewAccount({ methodId: selectedPaymentMethod, details: {} }); }} className="px-3 py-1 text-sm border rounded hover:bg-gray-50">Add Account</button>
+                    </div>
+                    {withdrawalAccounts.length === 0 ? (
+                      <div className="text-sm text-gray-500">No accounts added yet.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {withdrawalAccounts.map((acc) => (
+                          <div key={acc.id} className={`flex items-center justify-between border rounded p-2 ${selectedWithdrawalAccountId === acc.id ? 'border-black' : 'border-gray-200'}`}>
+                            <div>
+                              <div className="text-sm font-medium">{acc.label || acc.method_name}</div>
+                              <div className="text-xs text-gray-600">{(() => {
+                                try {
+                                  const d = typeof acc.details === 'string' ? JSON.parse(acc.details) : (acc.details || {});
+                                  if (d.accountNumber) return `Acct: ${d.accountNumber}`;
+                                  if (d.id) return `ID: ${d.id}`;
+                                } catch {}
+                                return '';
+                              })()}</div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button onClick={() => setSelectedWithdrawalAccountId(acc.id)} className="px-2 py-1 text-xs border rounded hover:bg-gray-50">Select</button>
+                              <button onClick={async () => {
+                                try { await financeApi.deleteWithdrawalAccount(acc.id); setWithdrawalAccounts(withdrawalAccounts.filter(a => a.id !== acc.id)); }
+                                catch(e){ console.error(e); alert('Failed'); }
+                              }} className="px-2 py-1 text-xs border rounded text-red-600 hover:bg-red-50">Delete</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
@@ -1102,12 +1341,134 @@ const Financial = () => {
                       {currentLang.cancel}
                     </button>
                     <button 
-                      disabled={!withdrawalAmount || parseFloat(withdrawalAmount) < 25 || parseFloat(withdrawalAmount) > availableBalance}
+                      disabled={!withdrawalAmount || parseFloat(withdrawalAmount) < 25 || parseFloat(withdrawalAmount) > availableBalance || !selectedWithdrawalAccountId}
+                      onClick={async () => {
+                        try {
+                          await financeApi.requestPayoutWithAccount(parseFloat(withdrawalAmount), selectedWithdrawalAccountId);
+                          try { const r = await financeApi.getTransactions({ type:'payout', limit:50}); setMyWithdrawals(r.transactions||r||[]);} catch {}
+                          alert('Payout request submitted');
+                          setWithdrawalAmount('');
+                        } catch (e) {
+                          console.error('Request payout failed', e);
+                          alert('Failed to request payout');
+                        }
+                      }}
                       className="flex-1 px-6 py-3 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {currentLang.confirm}
                     </button>
                   </div>
+                </div>
+              </div>
+
+              {/* My Withdrawal Requests */}
+              <div className="bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-lg border border-gray-200">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-xl font-bold text-gray-900">My Withdrawal Requests</h3>
+                  <button onClick={async ()=>{ try{ const r=await financeApi.getTransactions({ type:'payout', limit:50}); setMyWithdrawals(r.transactions||r||[]);}catch(e){console.error(e);} }} className="text-sm px-3 py-1.5 border rounded hover:bg-gray-50">Refresh</button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Date</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Amount</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Status</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Reference</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 bg-white">
+                      {listLoading.withdrawals ? (
+                        <tr><td colSpan={4} className="p-4 text-center text-gray-500">Loading...</td></tr>
+                      ) : myWithdrawals.length === 0 ? (
+                        <tr><td colSpan={4} className="p-4 text-center text-gray-500">No withdrawal requests found.</td></tr>
+                      ) : (
+                        myWithdrawals.map((t:any) => (
+                          <tr key={t.id} className="hover:bg-gray-50">
+                            <td className="px-4 py-2 text-sm text-gray-700">{new Date(t.created_at || t.date).toLocaleString()}</td>
+                            <td className="px-4 py-2 text-sm font-medium text-gray-900">${Number(t.amount).toFixed(2)} {t.currency || 'USD'}</td>
+                            <td className="px-4 py-2 text-sm">
+                              <span className={`px-2 py-1 text-xs rounded-full ${t.status==='completed'?'bg-green-100 text-green-700':t.status==='failed'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-800'}`}>{t.status}</span>
+                            </td>
+                            <td className="px-4 py-2 text-sm text-gray-700">{t.reference_id || '—'}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Add Withdrawal Account Modal */}
+          {showAddAccount && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+              <div className="bg-white rounded-lg shadow-lg w-full max-w-lg p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h4 className="text-lg font-semibold">Add Withdrawal Account</h4>
+                  <button onClick={() => setShowAddAccount(false)} className="text-gray-500 hover:text-black">✕</button>
+                </div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Method</label>
+                    <select value={newAccount.methodId} onChange={(e) => setNewAccount({...newAccount, methodId: e.target.value})} className="w-full border rounded px-3 py-2">
+                      <option value="">Select method</option>
+                      {withdrawalMethods.map((m) => (<option key={m.id} value={m.id}>{m.name}</option>))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Label (optional)</label>
+                    <input value={newAccount.label || ''} onChange={(e) => setNewAccount({...newAccount, label: e.target.value})} className="w-full border rounded px-3 py-2" />
+                  </div>
+                  {(() => {
+                    const cfg = (() => {
+                      const m = withdrawalMethods.find((x) => x.id === newAccount.methodId);
+                      try { return m && m.config ? (typeof m.config === 'string' ? JSON.parse(m.config) : m.config) : null; } catch { return null; }
+                    })();
+                    if (cfg?.kind === 'binance') {
+                      return (
+                        <div className="grid grid-cols-1 gap-3">
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Binance ID</label>
+                            <input className="w-full border rounded px-3 py-2" value={newAccount.details.id || ''} onChange={(e)=> setNewAccount({...newAccount, details: {...newAccount.details, id: e.target.value}})} />
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Binance Link (optional)</label>
+                            <input className="w-full border rounded px-3 py-2" value={newAccount.details.link || ''} onChange={(e)=> setNewAccount({...newAccount, details: {...newAccount.details, link: e.target.value}})} />
+                          </div>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Account Title</label>
+                          <input className="w-full border rounded px-3 py-2" value={newAccount.details.accountTitle || ''} onChange={(e)=> setNewAccount({...newAccount, details: {...newAccount.details, accountTitle: e.target.value}})} />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Account Number</label>
+                          <input className="w-full border rounded px-3 py-2" value={newAccount.details.accountNumber || ''} onChange={(e)=> setNewAccount({...newAccount, details: {...newAccount.details, accountNumber: e.target.value}})} />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Bank Name</label>
+                          <input className="w-full border rounded px-3 py-2" value={newAccount.details.bankName || ''} onChange={(e)=> setNewAccount({...newAccount, details: {...newAccount.details, bankName: e.target.value}})} />
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+                <div className="flex justify-end gap-2 mt-6">
+                  <button onClick={() => setShowAddAccount(false)} className="px-4 py-2 border rounded">Cancel</button>
+                  <button onClick={async ()=>{
+                    try {
+                      if (!newAccount.methodId) { alert('Select method'); return; }
+                      await financeApi.addWithdrawalAccount(newAccount);
+                      const resp = await financeApi.getWithdrawalAccounts();
+                      setWithdrawalAccounts(resp.accounts || []);
+                      setShowAddAccount(false);
+                    } catch (e) { console.error(e); alert('Failed to add'); }
+                  }} className="px-4 py-2 bg-black text-white rounded">Save</button>
                 </div>
               </div>
             </div>
@@ -1244,10 +1605,64 @@ const Financial = () => {
             </div>
           )}
         </main>
+        {showDepositSuccess && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+            <div className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6 border border-gray-200">
+              <div className="text-center space-y-3">
+                <div className="text-2xl font-bold text-gray-900">Thank you!</div>
+                <div className="text-gray-700">Your deposit has been submitted.</div>
+                {depositConfirmation?.amount !== undefined && (
+                  <div className="text-sm text-gray-600">Amount: ${depositConfirmation.amount?.toLocaleString()}</div>
+                )}
+                {depositConfirmation?.depositId && (
+                  <div className="text-xs text-gray-500">Reference ID: {depositConfirmation.depositId}</div>
+                )}
+                <div className="mt-2 text-sm text-yellow-700 bg-yellow-50 border border-yellow-200 rounded-md p-3 text-left">
+                  Manual verification is required and can take up to 24 hours. We'll notify you once it's approved.
+                </div>
+                <div className="pt-2">
+                  <button
+                    onClick={() => setShowDepositSuccess(false)}
+                    className="px-5 py-2 bg-black text-white rounded-lg hover:bg-gray-800"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       
 
     </div>
+    /* {showDepositSuccess && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+        <div className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6 border border-gray-200">
+          <div className="text-center space-y-3">
+            <div className="text-2xl font-bold text-gray-900">Thank you!</div>
+            <div className="text-gray-700">Your deposit has been submitted.</div>
+            {depositConfirmation?.amount !== undefined && (
+              <div className="text-sm text-gray-600">Amount: ${depositConfirmation.amount?.toLocaleString()}</div>
+            )}
+            {depositConfirmation?.depositId && (
+              <div className="text-xs text-gray-500">Reference ID: {depositConfirmation.depositId}</div>
+            )}
+            <div className="mt-2 text-sm text-yellow-700 bg-yellow-50 border border-yellow-200 rounded-md p-3 text-left">
+              Manual verification is required and can take up to 24 hours. We’ll notify you once it’s approved.
+            </div>
+            <div className="pt-2">
+              <button
+                onClick={() => setShowDepositSuccess(false)}
+                className="px-5 py-2 bg-black text-white rounded-lg hover:bg-gray-800"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )} */
   );
 };
 

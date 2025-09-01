@@ -25,7 +25,8 @@ import {
   faGlobe,
   faDollarSign,
   faFolderOpen,
-  faRobot
+  faRobot,
+  faCreditCard
 } from '@fortawesome/free-solid-svg-icons';
 import tiktokLogo from '../assets/tiktok-logo.png';
 import { useAuth } from '../contexts/AuthContext';
@@ -86,6 +87,7 @@ const AdminSidebar: React.FC<AdminSidebarProps> = ({ isOpen, onToggle }) => {
       label: 'Analytics & Reports',
       children: [
         { icon: faChartLine, label: 'Analytics', path: '/admin/analytics' },
+        { icon: faCreditCard, label: 'Financial Management', path: '/admin/financial-management' },
         { icon: faWallet, label: 'Financial Reports', path: '/admin/financial-reports' },
         { icon: faDatabase, label: 'System Metrics', path: '/admin/system-metrics' },
       ]
@@ -100,14 +102,15 @@ const AdminSidebar: React.FC<AdminSidebarProps> = ({ isOpen, onToggle }) => {
       ]
     },
     {
-      icon: faCog,
-      label: 'System Settings',
-      children: [
-        { icon: faCog, label: 'General Settings', path: '/admin/settings' },
-        { icon: faDollarSign, label: 'Currency Management', path: '/admin/currency' },
-        { icon: faTools, label: 'System Tools', path: '/admin/tools' },
-        { icon: faDatabase, label: 'Database', path: '/admin/database' },
-      ]
+              icon: faCog,
+        label: 'System Settings',
+        children: [
+          { icon: faCog, label: 'General Settings', path: '/admin/settings' },
+          { icon: faDollarSign, label: 'Currency Management', path: '/admin/currency' },
+          { icon: faCreditCard, label: 'Payment Methods', path: '/admin/payment-methods' },
+          { icon: faTools, label: 'System Tools', path: '/admin/tools' },
+          { icon: faDatabase, label: 'Database', path: '/admin/database' },
+        ]
     },
   ];
 

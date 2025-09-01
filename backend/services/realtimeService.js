@@ -5,7 +5,14 @@ class RealtimeService {
   constructor(io) {
     this.io = io;
     this.adminNamespace = io.of('/admin');
-    this.activeAdmins = new Map(); // Map of admin socket IDs to user info
+    this.activeAdmins = new Map();
+    this.lastStats = {};
+    this.lastActiveOrdersCount = 0;
+    this.lastPendingApprovalsCount = 0;
+    this.statsCache = {};
+    this.cacheExpiry = 30000; // 30 seconds cache
+    this.lastCacheUpdate = 0;
+    
     this.setupAdminNamespace();
   }
 
@@ -25,7 +32,11 @@ class RealtimeService {
           );
 
           if (admin.length > 0) {
-            this.activeAdmins.set(socket.id, admin[0]);
+            this.activeAdmins.set(socket.id, {
+              ...admin[0],
+              lastActivity: Date.now(),
+              socketId: socket.id
+            });
             socket.userId = userId;
             socket.join('admin-room');
             
@@ -117,7 +128,7 @@ class RealtimeService {
       const stats = await executeQuery(`
         SELECT 
           (SELECT COUNT(*) FROM users) as total_users,
-          (SELECT COUNT(*) FROM users WHERE role = 'seller') as total_sellers,
+          (SELECT COUNT(*) FROM users WHERE role = 'seller' AND role != 'admin') as total_sellers,
           (SELECT COUNT(*) FROM users WHERE role = 'admin') as total_admins,
           (SELECT COUNT(*) FROM products WHERE is_active = TRUE) as active_products,
           (SELECT COUNT(*) FROM orders WHERE status != 'cancelled') as total_orders,
@@ -183,7 +194,7 @@ class RealtimeService {
       const result = await executeQuery(`
         SELECT COUNT(*) as count
         FROM users 
-        WHERE role = 'seller' AND status = 'pending'
+        WHERE role = 'seller' AND role != 'admin' AND status = 'pending'
       `);
       return result[0]?.count || 0;
     } catch (error) {
@@ -296,26 +307,92 @@ class RealtimeService {
     });
   }
 
-  // Send periodic updates
+  // Send periodic updates with caching and intelligent updates
   startPeriodicUpdates() {
+    // Update system stats every 2 minutes (instead of 30 seconds)
     setInterval(async () => {
       try {
-        // Update system stats every 30 seconds
-        const systemStats = await this.getSystemStats();
-        this.broadcastToAdmins('system-stats-update', systemStats);
-
-        // Update active orders count every 10 seconds
-        const activeOrders = await this.getActiveOrdersCount();
-        this.broadcastToAdmins('active-orders-update', { count: activeOrders });
-
-        // Update pending approvals count every 30 seconds
-        const pendingApprovals = await this.getPendingApprovalsCount();
-        this.broadcastToAdmins('pending-approvals-update', { count: pendingApprovals });
-
+        const now = Date.now();
+        
+        // Only update if cache is expired or if there are connected admins
+        if (this.getConnectedAdminsCount() > 0 && 
+            (now - this.lastCacheUpdate > this.cacheExpiry || Object.keys(this.statsCache).length === 0)) {
+          
+          const systemStats = await this.getSystemStats();
+          
+          // Only broadcast if stats have changed significantly
+          if (this.hasStatsChanged(systemStats)) {
+            this.broadcastToAdmins('system-stats-update', systemStats);
+            this.lastStats = { ...systemStats };
+          }
+          
+          this.statsCache = systemStats;
+          this.lastCacheUpdate = now;
+        }
       } catch (error) {
-        logger.error('Error in periodic updates:', error);
+        logger.error('Error in system stats update:', error);
       }
-    }, 10000); // 10 seconds interval
+    }, 120000); // 2 minutes
+
+    // Update active orders count every 1 minute (instead of 10 seconds)
+    setInterval(async () => {
+      try {
+        if (this.getConnectedAdminsCount() > 0) {
+          const activeOrders = await this.getActiveOrdersCount();
+          
+          // Only broadcast if count has changed
+          if (activeOrders !== this.lastActiveOrdersCount) {
+            this.broadcastToAdmins('active-orders-update', { count: activeOrders });
+            this.lastActiveOrdersCount = activeOrders;
+          }
+        }
+      } catch (error) {
+        logger.error('Error in active orders update:', error);
+      }
+    }, 60000); // 1 minute
+
+    // Update pending approvals count every 2 minutes (instead of 30 seconds)
+    setInterval(async () => {
+      try {
+        if (this.getConnectedAdminsCount() > 0) {
+          const pendingApprovals = await this.getPendingApprovalsCount();
+          
+          // Only broadcast if count has changed
+          if (pendingApprovals !== this.lastPendingApprovalsCount) {
+            this.broadcastToAdmins('pending-approvals-update', { count: pendingApprovals });
+            this.lastPendingApprovalsCount = pendingApprovals;
+          }
+        }
+      } catch (error) {
+        logger.error('Error in pending approvals update:', error);
+      }
+    }, 120000); // 2 minutes
+  }
+
+  // Check if stats have changed significantly to avoid unnecessary broadcasts
+  hasStatsChanged(newStats) {
+    if (!this.lastStats || Object.keys(this.lastStats).length === 0) {
+      return true;
+    }
+    
+    const significantChange = 0.05; // 5% change threshold
+    
+    for (const [key, newValue] of Object.entries(newStats)) {
+      const oldValue = this.lastStats[key];
+      if (oldValue === undefined) continue;
+      
+      if (typeof newValue === 'number' && typeof oldValue === 'number') {
+        if (oldValue === 0 && newValue > 0) return true;
+        if (oldValue > 0) {
+          const change = Math.abs(newValue - oldValue) / oldValue;
+          if (change > significantChange) return true;
+        }
+      } else if (newValue !== oldValue) {
+        return true;
+      }
+    }
+    
+    return false;
   }
 
   // Get connected admins count
@@ -326,6 +403,30 @@ class RealtimeService {
   // Get connected admins info
   getConnectedAdmins() {
     return Array.from(this.activeAdmins.values());
+  }
+
+  // Update admin activity
+  updateAdminActivity(adminId) {
+    const admin = this.activeAdmins.get(adminId);
+    if (admin) {
+      admin.lastActivity = Date.now();
+    }
+  }
+
+  // Check if we should stop updates due to no admin activity
+  shouldStopUpdates() {
+    const connectedAdmins = this.getConnectedAdminsCount();
+    if (connectedAdmins === 0) {
+      // If no admins for more than 5 minutes, consider stopping updates
+      const lastAdminActivity = Math.max(...Array.from(this.activeAdmins.values()).map(admin => admin.lastActivity || 0));
+      const timeSinceLastActivity = Date.now() - lastAdminActivity;
+      
+      if (timeSinceLastActivity > 300000) { // 5 minutes
+        logger.info('No admin activity for 5+ minutes, considering stopping updates');
+        return true;
+      }
+    }
+    return false;
   }
 }
 

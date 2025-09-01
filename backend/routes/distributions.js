@@ -14,7 +14,8 @@ router.get('/', authenticateToken, [
   query('limit').optional().isInt({ min: 1, max: 1000 }).withMessage('Limit must be between 1 and 1000'),
   query('status').optional().isIn(['pending', 'active', 'paused', 'cancelled']).withMessage('Invalid status'),
   query('search').optional().isString().withMessage('Search must be a string'),
-  query('sortBy').optional().isIn(['created_at', 'updated_at', 'seller_price', 'allocated_stock']).withMessage('Invalid sort field'),
+  // Accept string and map/sanitize below to supported columns (camelCase or snake_case)
+  query('sortBy').optional().isString().withMessage('Invalid sort field'),
   query('sortOrder').optional().isIn(['asc', 'desc']).withMessage('Sort order must be asc or desc')
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
@@ -31,6 +32,19 @@ router.get('/', authenticateToken, [
   const parsedLimit = Math.min(1000, Math.max(1, parseInt(limit) || 20));
   const offset = (parsedPage - 1) * parsedLimit;
   const userId = req.userId;
+
+  // Map camelCase to snake_case and sanitize sortBy
+  const sortMap = {
+    createdAt: 'created_at',
+    updatedAt: 'updated_at',
+    sellerPrice: 'seller_price',
+    allocatedStock: 'allocated_stock',
+    created_at: 'created_at',
+    updated_at: 'updated_at',
+    seller_price: 'seller_price',
+    allocated_stock: 'allocated_stock'
+  };
+  const sortColumn = sortMap[String(sortBy)] || 'created_at';
 
   // Build WHERE clause based on user role and filters
   let whereClause = 'pd.id IS NOT NULL';
@@ -54,7 +68,7 @@ router.get('/', authenticateToken, [
   }
 
   // Build ORDER BY clause
-  const orderClause = `ORDER BY pd.${sortBy} ${sortOrder.toUpperCase()}`;
+  const orderClause = `ORDER BY pd.${sortColumn} ${String(sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC'}`;
 
   // Get distributions with product and seller info
   const distributions = await executeQuery(`
@@ -153,8 +167,9 @@ router.get('/:id', authenticateToken, asyncHandler(async (req, res) => {
 // Create new distribution
 router.post('/', authenticateToken, [
   body('productId').isUUID().withMessage('Valid product ID is required'),
-  body('allocatedStock').optional().isInt({ min: 1 }).withMessage('Allocated stock must be a positive integer'),
-  body('markup').optional().isFloat({ min: 0 }).withMessage('Markup must be a non-negative number'),
+  // Allow zero or greater so callers can omit or explicitly set 0
+  body('allocatedStock').optional({ checkFalsy: true }).isInt({ min: 0 }).withMessage('Allocated stock must be a non-negative integer'),
+  body('markup').optional({ checkFalsy: true }).isFloat({ min: 0 }).withMessage('Markup must be a non-negative number'),
   body('sellerNotes').optional().isString().withMessage('Seller notes must be a string')
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
@@ -178,16 +193,33 @@ router.post('/', authenticateToken, [
     });
   }
 
-  // Check if distribution already exists for this seller and product
+  // Check if distribution already exists for this seller and product (idempotent create)
   const existingDistributions = await executeQuery(
-    'SELECT * FROM product_distributions WHERE product_id = ? AND seller_id = ?',
+    'SELECT * FROM product_distributions WHERE product_id = ? AND seller_id = ? LIMIT 1',
     [productId, sellerId]
   );
 
   if (existingDistributions.length > 0) {
-    return res.status(409).json({
-      error: true,
-      message: 'Distribution already exists for this product and seller'
+    // Return existing record with joined info
+    const existingId = existingDistributions[0].id;
+    const existing = await executeQuery(`
+      SELECT 
+        pd.*,
+        p.name as product_name,
+        p.sku as product_sku,
+        p.price,
+        p.images as product_images,
+        u.full_name as seller_name,
+        u.email as seller_email
+      FROM product_distributions pd
+      LEFT JOIN products p ON pd.product_id = p.id
+      LEFT JOIN users u ON pd.seller_id = u.id
+      WHERE pd.id = ?
+    `, [existingId]);
+    return res.status(200).json({
+      error: false,
+      message: 'Distribution already exists',
+      distribution: existing[0]
     });
   }
 
@@ -233,8 +265,8 @@ router.post('/', authenticateToken, [
 
 // Update distribution
 router.put('/:id', authenticateToken, [
-  body('allocatedStock').optional().isInt({ min: 0 }).withMessage('Allocated stock must be a non-negative integer'),
-  body('markup').optional().isFloat({ min: 0 }).withMessage('Markup must be a non-negative number'),
+  body('allocatedStock').optional({ checkFalsy: true }).isInt({ min: 0 }).withMessage('Allocated stock must be a non-negative integer'),
+  body('markup').optional({ checkFalsy: true }).isFloat({ min: 0 }).withMessage('Markup must be a non-negative number'),
   body('sellerNotes').optional().isString().withMessage('Seller notes must be a string'),
   body('status').optional().isIn(['pending', 'active', 'paused', 'cancelled']).withMessage('Invalid status'),
   body('adminNotes').optional().isString().withMessage('Admin notes must be a string')

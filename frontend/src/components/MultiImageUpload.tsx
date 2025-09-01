@@ -70,34 +70,30 @@ const MultiImageUpload: React.FC<MultiImageUploadProps> = ({
   const handleFileSelect = useCallback((files: FileList | null) => {
     if (!files) return;
 
-    const newImages: ImageFile[] = [];
     const errors: string[] = [];
+    const accepted: ImageFile[] = [];
 
-    Array.from(files).forEach(file => {
+    for (const file of Array.from(files)) {
       const error = validateFile(file);
       if (error) {
         errors.push(`${file.name}: ${error}`);
-        return;
+        continue;
       }
 
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const newImage: ImageFile = {
-          id: generateId(),
-          file,
-          url: e.target?.result as string,
-          isNew: true
-        };
-        newImages.push(newImage);
-        
-        // Update state when all files are processed
-        if (newImages.length === Array.from(files).length) {
-          const updatedImages = [...value.filter(img => !img.isRemoved), ...newImages];
-          onChange(updatedImages);
-        }
-      };
-      reader.readAsDataURL(file);
-    });
+      // Use object URLs for instant preview without async FileReader
+      const objectUrl = URL.createObjectURL(file);
+      accepted.push({
+        id: generateId(),
+        file,
+        url: objectUrl,
+        isNew: true
+      });
+    }
+
+    if (accepted.length > 0) {
+      const updatedImages = [...value.filter(img => !img.isRemoved), ...accepted];
+      onChange(updatedImages);
+    }
 
     if (errors.length > 0) {
       alert('Upload errors:\n' + errors.join('\n'));
@@ -113,9 +109,17 @@ const MultiImageUpload: React.FC<MultiImageUploadProps> = ({
   };
 
   const handleRemoveImage = (imageId: string) => {
-    const updatedImages = value.map(img => 
-      img.id === imageId ? { ...img, isRemoved: true } : img
-    );
+    const updatedImages = value.map(img => {
+      if (img.id === imageId) {
+        try {
+          if (img.url && img.url.startsWith('blob:')) {
+            URL.revokeObjectURL(img.url);
+          }
+        } catch {}
+        return { ...img, isRemoved: true };
+      }
+      return img;
+    });
     onChange(updatedImages);
   };
 

@@ -183,7 +183,7 @@ router.get('/seller/:id/shop', asyncHandler(async (req, res) => {
            COUNT(CASE WHEN p.is_active = TRUE THEN 1 END) as active_products
     FROM users u
     LEFT JOIN products p ON u.id = p.created_by
-    WHERE u.id = ? AND u.role = 'seller' AND u.status = 'active'
+    WHERE u.id = ? AND u.role = 'seller' AND u.role != 'admin' AND u.status = 'active'
     GROUP BY u.id
   `, [id]);
 
@@ -221,7 +221,7 @@ router.get('/seller/:id/products', asyncHandler(async (req, res) => {
 
   // Verify seller exists and is active
   const seller = await executeQuery(
-    'SELECT id FROM users WHERE id = ? AND role = "seller" AND status = "active"',
+    'SELECT id FROM users WHERE id = ? AND role = "seller" AND role != "admin" AND status = "active"',
     [id]
   );
 

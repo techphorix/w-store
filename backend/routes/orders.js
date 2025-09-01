@@ -119,6 +119,55 @@ router.get('/', authenticateToken, [
   const total = countResult[0].total;
   const totalPages = Math.ceil(total / parsedLimit);
 
+  // Also include synthetic orders for sellers (generated from overrides)
+  let syntheticOrders = [];
+  if (req.user.role === 'seller') {
+    try {
+      // Build synthetic filter
+      const synthWhere = ['seller_id = ?'];
+      const synthParams = [req.userId];
+      if (status) {
+        synthWhere.push('status = ?');
+        synthParams.push(status);
+      }
+      if (startDate) {
+        synthWhere.push('created_at >= ?');
+        synthParams.push(startDate);
+      }
+      if (endDate) {
+        synthWhere.push('created_at <= ?');
+        synthParams.push(endDate + ' 23:59:59');
+      }
+      if (search) {
+        synthWhere.push('(order_number LIKE ? OR customer_name LIKE ?)');
+        const t = `%${search}%`;
+        synthParams.push(t, t);
+      }
+      const synthWhereClause = synthWhere.join(' AND ');
+      syntheticOrders = await executeQuery(`
+        SELECT 
+          id,
+          order_number,
+          NULL as customer_id,
+          seller_id,
+          status,
+          total_amount,
+          subtotal,
+          tax_amount,
+          shipping_amount,
+          created_at,
+          updated_at,
+          customer_name,
+          customer_email
+        FROM synthetic_orders
+        WHERE ${synthWhereClause}
+        ORDER BY created_at DESC
+      `, synthParams);
+    } catch (e) {
+      logger.warn('Failed to fetch synthetic orders (non-fatal):', e.message);
+    }
+  }
+
   // Parse JSON fields
   orders.forEach(order => {
     if (order.shipping_address) {
@@ -137,14 +186,25 @@ router.get('/', authenticateToken, [
     }
   });
 
+  // Merge and paginate on the application side for sellers
+  let mergedOrders = orders;
+  let mergedTotal = total;
+  if (req.user.role === 'seller') {
+    mergedOrders = [...orders, ...syntheticOrders].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    mergedTotal = mergedOrders.length;
+    const start = (parsedPage - 1) * parsedLimit;
+    const end = start + parsedLimit;
+    mergedOrders = mergedOrders.slice(start, end);
+  }
+
   res.json({
     error: false,
-    orders,
+    orders: req.user.role === 'seller' ? mergedOrders : orders,
     pagination: {
       page: parseInt(page),
       limit: parseInt(limit),
-      total,
-      totalPages
+      total: req.user.role === 'seller' ? mergedTotal : total,
+      totalPages: req.user.role === 'seller' ? Math.ceil(mergedTotal / parsedLimit) : totalPages
     }
   });
 }));
@@ -169,6 +229,30 @@ router.get('/:id', authenticateToken, asyncHandler(async (req, res) => {
   `, [id]);
 
   if (order.length === 0) {
+    // Try synthetic orders fallback
+    try {
+      const synth = await executeQuery(
+        'SELECT * FROM synthetic_orders WHERE id = ?',
+        [id]
+      );
+      if (synth.length > 0) {
+        const s = synth[0];
+        // Minimal shape compatible with frontend
+        return res.json({
+          error: false,
+          order: {
+            ...s,
+            customer_name: s.customer_name,
+            customer_email: s.customer_email,
+            seller_name: null,
+            seller_email: null
+          },
+          items: await executeQuery('SELECT * FROM synthetic_order_items WHERE order_id = ?', [id])
+        });
+      }
+    } catch (e) {
+      // ignore
+    }
     return res.status(404).json({
       error: true,
       message: 'Order not found'

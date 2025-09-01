@@ -730,9 +730,11 @@ router.post('/:id/distribute', authenticateToken, requireAdminOrSeller, asyncHan
   );
 
   if (existingDistribution.length > 0) {
-    return res.status(400).json({
-      error: true,
-      message: 'Distribution already exists for this product'
+    // Idempotent: return the existing distribution details
+    return res.status(200).json({
+      error: false,
+      message: 'Distribution already exists',
+      distribution: existingDistribution[0]
     });
   }
 

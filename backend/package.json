@@ -12,6 +12,7 @@
     "test:admin-overrides": "node scripts/test-admin-overrides.js",
     "test:overrides-api": "node test-overrides-api.js",
     "cleanup:overrides": "node scripts/cleanup-invalid-overrides.js",
+    "purge:overrides": "node scripts/purge-admin-overrides.js --all -y",
     "seed": "node scripts/seed.js"
   },
   "dependencies": {

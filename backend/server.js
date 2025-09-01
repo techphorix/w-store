@@ -24,6 +24,7 @@ const searchRoutes = require('./routes/search');
 const distributionRoutes = require('./routes/distributions');
 const uploadRoutes = require('./routes/uploads');
 const categoryRoutes = require('./routes/categories');
+const sellerRoutes = require('./routes/seller');
 
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
@@ -47,7 +48,7 @@ const io = socketIo(server, {
 });
 
 // Create rate limiters
-const { general, auth, sensitive, uploads, search, refresh } = createRateLimiters();
+const { general, auth, userStatus, sensitive, uploads, search, refresh } = createRateLimiters();
 
 // Middleware
 app.use(helmet());
@@ -64,7 +65,16 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(general);
 
 // Static files
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Serve uploaded files with relaxed CORP so frontend can preview cross-origin
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  setHeaders: (res) => {
+    // Allow embedding/consumption from another origin (frontend dev server)
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    if (process.env.FRONTEND_URL) {
+      res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL);
+    }
+  }
+}));
 
 // Health check (no rate limiting)
 app.get('/health', (req, res) => {
@@ -78,6 +88,8 @@ app.get('/health', (req, res) => {
 // API Routes with specific rate limiting
 // Apply refresh rate limiter specifically to refresh endpoint FIRST
 app.use('/api/auth/refresh', refresh);
+// Apply userStatus rate limiter to /me endpoint and other status checks
+app.use('/api/auth/me', userStatus);
 app.use('/api/auth', auth, authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
@@ -90,6 +102,7 @@ app.use('/api/finance', authenticateToken, financeRoutes);
 app.use('/api/search', search, searchRoutes);
 app.use('/api/distributions', authenticateToken, distributionRoutes);
 app.use('/api/uploads', uploadRoutes);
+app.use('/api/seller', sellerRoutes);
 
 // Initialize real-time service
 const realtimeService = new RealtimeService(io);

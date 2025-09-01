@@ -533,6 +533,40 @@ const Dashboard = () => {
 
   const currentTimeframeData = getCurrentTimeframeData();
 
+  // Helper function to get the current value for a specific metric
+  const getCurrentMetricValue = (metricName: string) => {
+    // If we have the new metrics structure from the backend, use it
+    if (stats?.metrics) {
+      const periodKey = activeTab === 'today' ? 'today' : 
+                       activeTab === 'last7Days' ? 'last7days' : 
+                       activeTab === 'last30Days' ? 'last30days' : 'total';
+      
+      return stats.metrics[metricName]?.[periodKey] || 0;
+    }
+    
+    // Fallback to dashboard stats
+    switch (metricName) {
+      case 'orders_sold':
+        return currentTimeframeData.ordersSold;
+      case 'total_sales':
+        return currentTimeframeData.totalSales;
+      case 'profit_forecast':
+        return currentTimeframeData.profitForecast;
+      case 'visitors':
+        return currentTimeframeData.visitors;
+      case 'shop_followers':
+        return stats?.shopFollowers || 100;
+      case 'shop_rating':
+        return stats?.shopRating || 4.5;
+      case 'credit_score':
+        return stats?.creditScore || 750;
+      case 'total_customers':
+        return stats?.totalCustomers || 0;
+      default:
+        return 0;
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Fake Data Banner */}
@@ -724,14 +758,15 @@ const Dashboard = () => {
             <EditableMetricField
               sellerId={user?._id || ''}
               metricName="orders_sold"
-              currentValue={stats?.ordersSold || 0}
-              originalValue={stats?.ordersSold || 0}
+              currentValue={getCurrentMetricValue('orders_sold')}
+              originalValue={getCurrentMetricValue('orders_sold')}
               label={currentLang.ordersSold}
               format="number"
               isAdmin={hasAdminPrivileges}
+              period={activeTab === 'today' ? 'today' : activeTab === 'last7Days' ? 'last7days' : activeTab === 'last30Days' ? 'last30days' : 'total'}
               onValueChange={(newValue) => {
                 // Update both local and centralized stats
-                setDashboardStats(prev => ({ ...prev, today: { ...prev.today, ordersSold: newValue } }));
+                setDashboardStats(prev => ({ ...prev, [activeTab]: { ...prev[activeTab], ordersSold: newValue } }));
               }}
             />
 
@@ -739,14 +774,15 @@ const Dashboard = () => {
             <EditableMetricField
               sellerId={user?._id || ''}
               metricName="total_sales"
-              currentValue={stats?.totalSales || 0}
-              originalValue={stats?.totalSales || 0}
+              currentValue={getCurrentMetricValue('total_sales')}
+              originalValue={getCurrentMetricValue('total_sales')}
               label={currentLang.totalSales}
               format="currency"
               isAdmin={hasAdminPrivileges}
+              period={activeTab === 'today' ? 'today' : activeTab === 'last7Days' ? 'last7days' : activeTab === 'last30Days' ? 'last30days' : 'total'}
               onValueChange={(newValue) => {
                 // Update both local and centralized stats
-                setDashboardStats(prev => ({ ...prev, today: { ...prev.today, totalSales: newValue } }));
+                setDashboardStats(prev => ({ ...prev, [activeTab]: { ...prev[activeTab], totalSales: newValue } }));
               }}
             />
 
@@ -754,14 +790,15 @@ const Dashboard = () => {
             <EditableMetricField
               sellerId={user?._id || ''}
               metricName="profit_forecast"
-              currentValue={stats?.profitForecast || 0}
-              originalValue={stats?.profitForecast || 0}
+              currentValue={getCurrentMetricValue('profit_forecast')}
+              originalValue={getCurrentMetricValue('profit_forecast')}
               label={currentLang.profitForecast}
               format="currency"
               isAdmin={hasAdminPrivileges}
+              period={activeTab === 'today' ? 'today' : activeTab === 'last7Days' ? 'last7days' : activeTab === 'last30Days' ? 'last30days' : 'total'}
               onValueChange={(newValue) => {
                 // Update both local and centralized stats
-                setDashboardStats(prev => ({ ...prev, today: { ...prev.today, profitForecast: newValue } }));
+                setDashboardStats(prev => ({ ...prev, [activeTab]: { ...prev[activeTab], profitForecast: newValue } }));
               }}
             />
 
@@ -769,84 +806,38 @@ const Dashboard = () => {
             <EditableMetricField
               sellerId={user?._id || ''}
               metricName="visitors"
-              currentValue={stats?.visitors || 0}
-              originalValue={stats?.visitors || 0}
+              currentValue={getCurrentMetricValue('visitors')}
+              originalValue={getCurrentMetricValue('visitors')}
               label={currentLang.visitors}
               format="number"
               isAdmin={hasAdminPrivileges}
+              period={activeTab === 'today' ? 'today' : activeTab === 'last7Days' ? 'last7days' : activeTab === 'last30Days' ? 'last30days' : 'total'}
               onValueChange={(newValue) => {
                 // Update both local and centralized stats
-                setDashboardStats(prev => ({ ...prev, today: { ...prev.today, visitors: newValue } }));
+                setDashboardStats(prev => ({ ...prev, [activeTab]: { ...prev[activeTab], visitors: newValue } }));
               }}
             />
 
             {/* Total metrics */}
             {activeTab === 'total' && (
               <>
-                {/* Total Sales */}
-                <div className="bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-lg border border-gray-200">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-600">{currentLang.totalSales}</p>
-                      <p className="text-2xl font-bold text-gray-900">${dashboardStats.total.sales.toLocaleString()}</p>
-                    </div>
-                    <div className="p-3 bg-black rounded-lg">
-                      <FontAwesomeIcon icon={faDollarSign} className="w-6 h-6 text-white" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Total Orders */}
-                <div className="bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-lg border border-gray-200">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-600">{currentLang.totalOrders}</p>
-                      <p className="text-2xl font-bold text-gray-900">{dashboardStats.total.orders.toLocaleString()}</p>
-                    </div>
-                    <div className="p-3 bg-black rounded-lg">
-                      <FontAwesomeIcon icon={faShoppingBag} className="w-6 h-6 text-white" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Total Products */}
-                <div className="bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-lg border border-gray-200">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-600">{currentLang.totalProducts}</p>
-                      <p className="text-2xl font-bold text-gray-900">{dashboardStats.total.products}</p>
-                    </div>
-                    <div className="p-3 bg-black rounded-lg">
-                      <FontAwesomeIcon icon={faStore} className="w-6 h-6 text-white" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Total Customers */}
-                <div className="bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-lg border border-gray-200">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-600">{currentLang.totalCustomers}</p>
-                      <p className="text-2xl font-bold text-gray-900">{dashboardStats.total.customers}</p>
-                    </div>
-                    <div className="p-3 bg-black rounded-lg">
-                      <FontAwesomeIcon icon={faUsers} className="w-6 h-6 text-white" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Total Visitors */}
-                <div className="bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-lg border border-gray-200">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-600">{currentLang.visitors}</p>
-                      <p className="text-2xl font-bold text-gray-900">{dashboardStats.total.visitors.toLocaleString()}</p>
-                    </div>
-                    <div className="p-3 bg-black rounded-lg">
-                      <FontAwesomeIcon icon={faEye} className="w-6 h-6 text-white" />
-                    </div>
-                  </div>
-                </div>
+                {/* Total Customers - editable for admin to trigger generation */}
+                <EditableMetricField
+                  sellerId={user?._id || ''}
+                  metricName="total_customers"
+                  currentValue={getCurrentMetricValue('total_customers')}
+                  originalValue={getCurrentMetricValue('total_customers')}
+                  label={currentLang.totalCustomers}
+                  format="number"
+                  isAdmin={hasAdminPrivileges}
+                  period="total"
+                  onValueChange={(newValue) => {
+                    setDashboardStats(prev => ({
+                      ...prev,
+                      total: { ...prev.total, customers: newValue }
+                    }));
+                  }}
+                />
               </>
             )}
 
@@ -854,11 +845,12 @@ const Dashboard = () => {
             <EditableMetricField
               sellerId={user?._id || ''}
               metricName="shop_followers"
-              currentValue={stats?.shopFollowers || 100}
-              originalValue={stats?.shopFollowers || 100}
+              currentValue={getCurrentMetricValue('shop_followers')}
+              originalValue={getCurrentMetricValue('shop_followers')}
               label={currentLang.shopFollowers}
               format="number"
               isAdmin={hasAdminPrivileges}
+              period={activeTab === 'today' ? 'today' : activeTab === 'last7Days' ? 'last7days' : activeTab === 'last30Days' ? 'last30days' : 'total'}
               onValueChange={(newValue) => {
                 // Update both local and centralized stats
                 setDashboardStats(prev => ({ ...prev, shopFollowers: newValue }));
@@ -868,11 +860,12 @@ const Dashboard = () => {
             <EditableMetricField
               sellerId={user?._id || ''}
               metricName="shop_rating"
-              currentValue={stats?.shopRating || 4.5}
-              originalValue={stats?.shopRating || 4.5}
+              currentValue={getCurrentMetricValue('shop_rating')}
+              originalValue={getCurrentMetricValue('shop_rating')}
               label={currentLang.shopRating}
               format="rating"
               isAdmin={hasAdminPrivileges}
+              period={activeTab === 'today' ? 'today' : activeTab === 'last7Days' ? 'last7days' : activeTab === 'last30Days' ? 'last30days' : 'total'}
               onValueChange={(newValue) => {
                 // Update both local and centralized stats
                 setDashboardStats(prev => ({ ...prev, shopRating: newValue }));
@@ -882,11 +875,12 @@ const Dashboard = () => {
             <EditableMetricField
               sellerId={user?._id || ''}
               metricName="credit_score"
-              currentValue={stats?.creditScore || 750}
-              originalValue={stats?.creditScore || 750}
+              currentValue={getCurrentMetricValue('credit_score')}
+              originalValue={getCurrentMetricValue('credit_score')}
               label={currentLang.creditScore}
               format="number"
               isAdmin={hasAdminPrivileges}
+              period={activeTab === 'today' ? 'today' : activeTab === 'last7Days' ? 'last7days' : activeTab === 'last30Days' ? 'last30days' : 'total'}
               onValueChange={(newValue) => {
                 // Update both local and centralized stats
                 setDashboardStats(prev => ({ ...prev, creditScore: newValue }));

@@ -387,8 +387,20 @@ const Products = () => {
         fetchDistributions();
       }
     } catch (error) {
+      const status = (error as any)?.response?.status;
+      const msg = (error as any)?.response?.data?.message;
+      if (status === 409 || status === 400) {
+        // Already exists – treat as success and refresh
+        if (activeTab === 'products') {
+          fetchProducts();
+        } else {
+          fetchDistributions();
+        }
+        alert(msg || 'Distribution already exists for this product.');
+        return;
+      }
       console.error('Error creating distribution:', error);
-      alert('Failed to create distribution. Please try again.');
+      alert(msg || 'Failed to create distribution. Please try again.');
     }
   };
 
@@ -472,11 +484,12 @@ const Products = () => {
 
 
   // Handle distribution selection
-  const handleDistributionSelect = (distributionId: string) => {
+  const handleDistributionSelect = (distributionId: string | number) => {
+    const idStr = String(distributionId);
     setSelectedDistributions(prev =>
-      prev.includes(distributionId)
-        ? prev.filter(id => id !== distributionId)
-        : [...prev, distributionId]
+      prev.includes(idStr)
+        ? prev.filter(id => id !== idStr)
+        : [...prev, idStr]
     );
   };
 
@@ -485,7 +498,7 @@ const Products = () => {
     if (selectedDistributions.length === distributions.length) {
       setSelectedDistributions([]);
     } else {
-      setSelectedDistributions(distributions.map(d => d._id));
+      setSelectedDistributions(distributions.map(d => String(d.id || d._id)));
     }
   };
 
@@ -512,10 +525,90 @@ const Products = () => {
     return matchesSearch && matchesCategory && matchesStatus;
   });
 
-  // Filter distributions
+  // Helpers to normalize distribution -> product fields from API
+  const getDistributionProductName = (d: any) => (d?.product?.name ?? d?.product_name ?? '').toString();
+  const getDistributionProductCategory = (d: any) => (d?.product?.category ?? d?.product_category ?? d?.category ?? null);
+  const getBackendOrigin = () => {
+    try {
+      // Prefer explicit env, fallback to dev-port swap
+      const envUrl = (import.meta as any)?.env?.VITE_BACKEND_URL;
+      if (envUrl) return String(envUrl);
+      if (typeof window !== 'undefined' && window.location?.origin) {
+        // Common dev setup: frontend 3000, backend 5000
+        return window.location.origin.replace(':3000', ':5000');
+      }
+    } catch {}
+    return '';
+  };
+
+  const normalizeImageUrl = (url: any): string => {
+    if (!url) return '';
+    const s = String(url).trim();
+    if (!s) return '';
+    if (/^data:|^https?:\/\//i.test(s)) return s; // data URL or absolute
+    const backend = getBackendOrigin();
+    // Map plain filenames to uploads/products
+    if (!s.includes('/')) {
+      const path = `/uploads/products/${s}`;
+      return backend ? `${backend}${path}` : path;
+    }
+    // Ensure leading slash
+    const withSlash = s.startsWith('/') ? s : `/${s}`;
+    // If pointing to /uploads, prefix backend origin for dev
+    if (withSlash.startsWith('/uploads')) {
+      return backend ? `${backend}${withSlash}` : withSlash;
+    }
+    return withSlash;
+  };
+
+  const getDistributionFirstImage = (d: any) => {
+    // Try nested first, then common fallbacks
+    let images: any =
+      d?.product?.images ??
+      d?.product_images ??
+      d?.images ??
+      d?.image ??
+      d?.image_url ??
+      d?.imageUrl ??
+      d?.thumbnail ?? null;
+
+    try {
+      if (typeof images === 'string') {
+        const trimmed = images.trim();
+        if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+          images = JSON.parse(trimmed);
+        } else {
+          // Single URL string
+          return trimmed;
+        }
+      }
+    } catch {}
+
+    if (Array.isArray(images) && images.length > 0) {
+      const first = images[0];
+      if (typeof first === 'string') return normalizeImageUrl(first);
+      if (first && typeof first === 'object') {
+        if ((first as any).url) return normalizeImageUrl((first as any).url);
+        if ((first as any).src) return normalizeImageUrl((first as any).src);
+        if ((first as any).link) return normalizeImageUrl((first as any).link);
+      }
+    }
+
+    if (images && typeof images === 'object') {
+      if ((images as any).url) return normalizeImageUrl((images as any).url);
+      if ((images as any).src) return normalizeImageUrl((images as any).src);
+    }
+
+    // Return empty to allow UI to show placeholder without broken image
+    return '';
+  };
+
+  // Filter distributions (robust to missing nested product)
   const filteredDistributions = distributions.filter(distribution => {
-    const matchesSearch = distribution.product.name.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesCategory = selectedCategory === 'all' || distribution.product.category === selectedCategory;
+    const name = getDistributionProductName(distribution).toLowerCase();
+    const matchesSearch = !searchTerm || name.includes(searchTerm.toLowerCase());
+    const category = getDistributionProductCategory(distribution);
+    const matchesCategory = selectedCategory === 'all' || (category ? category === selectedCategory : true);
     const matchesStatus = selectedStatus === 'all' || distribution.status === selectedStatus;
     return matchesSearch && matchesCategory && matchesStatus;
   });
@@ -535,6 +628,12 @@ const Products = () => {
       return (num / 1000).toFixed(1) + 'K';
     }
     return num.toString();
+  };
+
+  // Safely format money values even if undefined/NaN
+  const formatMoney = (value: unknown, decimals: number = 2) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num.toFixed(decimals) : (0).toFixed(decimals);
   };
 
   const currentLang = translations[currentLanguage];
@@ -759,7 +858,7 @@ const Products = () => {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm font-medium text-gray-600">Total Revenue</p>
-                      <p className="text-3xl font-bold text-gray-900">${stats.totalRevenue.toFixed(2)}</p>
+                      <p className="text-3xl font-bold text-gray-900">${formatMoney(stats.totalRevenue)}</p>
                     </div>
                     <div className="p-3 bg-purple-500 rounded-lg">
                       <FontAwesomeIcon icon={faDollarSign} className="w-6 h-6 text-white" />
@@ -772,7 +871,7 @@ const Products = () => {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm font-medium text-gray-600">Total Profit</p>
-                      <p className="text-3xl font-bold text-gray-900">${stats.totalProfit.toFixed(2)}</p>
+                      <p className="text-3xl font-bold text-gray-900">${formatMoney(stats.totalProfit)}</p>
                     </div>
                     <div className="p-3 bg-orange-500 rounded-lg">
                       <FontAwesomeIcon icon={faChartLine} className="w-6 h-6 text-white" />
@@ -898,12 +997,13 @@ const Products = () => {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 pb-8">
-                  {filteredProducts.map((product) => {
+                  {filteredProducts.map((product, index) => {
                     const stockStatus = getStockStatus(product.stock);
                     const productImage = product.images?.[0]?.url || '/api/placeholder/300/300';
                     
+                    const pid = (product.id || product._id || product.sku || index);
                     return (
-                      <div key={product._id} className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg border border-gray-200 overflow-hidden hover:shadow-xl transition-shadow">
+                      <div key={pid} className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg border border-gray-200 overflow-hidden hover:shadow-xl transition-shadow">
                         {/* Product Image */}
                         <div className="relative">
                           <div className="aspect-square bg-gray-200 flex items-center justify-center">
@@ -989,7 +1089,7 @@ const Products = () => {
 
                           {/* Add Distribution Button */}
                           <button
-                            onClick={() => handleAddDistribution(product._id)}
+                            onClick={() => handleAddDistribution(product.id || product._id)}
                             disabled={product.isDistributed || product.stock === 0}
                             className={`w-full py-2 px-4 rounded-lg font-medium text-sm transition-colors ${
                               product.isDistributed
@@ -1022,13 +1122,19 @@ const Products = () => {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 pb-8">
-                  {filteredDistributions.map((distribution) => {
-                    const productImage = distribution.product.images?.[0]?.url || '/api/placeholder/300/300';
-                    const isSelected = selectedDistributions.includes(distribution._id);
-                    
+                  {filteredDistributions.map((distribution, index) => {
+                    const productImage = getDistributionFirstImage(distribution);
+                    const did = (distribution.id || distribution._id || index);
+                    const isSelected = selectedDistributions.includes(String(did));
+                    // Safe accessors for product fields
+                    const productName = getDistributionProductName(distribution);
+                    const productCategory = getDistributionProductCategory(distribution);
+                    const productCategoryKey = productCategory ? String(productCategory).toLowerCase().trim().replace(/\s+/g, '_') : '';
+                    const productCategoryLabel = (productCategoryKey && (currentLang.categories as any)[productCategoryKey]) || (productCategory || 'N/A');
+                    const hasValidImage = typeof productImage === 'string' && productImage.trim() !== '' && !productImage.startsWith('/api/placeholder');
                     return (
                       <div 
-                        key={distribution._id} 
+                        key={did} 
                         className={`bg-white/90 backdrop-blur-sm rounded-xl shadow-lg border overflow-hidden hover:shadow-xl transition-all ${
                           isSelected ? 'border-black ring-2 ring-black' : 'border-gray-200'
                         }`}
@@ -1036,13 +1142,20 @@ const Products = () => {
                         {/* Product Image with Selection */}
                         <div className="relative">
                           <div className="aspect-square bg-gray-200 flex items-center justify-center">
-                            {productImage.startsWith('/api/placeholder') ? (
+                            {!hasValidImage ? (
                               <FontAwesomeIcon icon={faImage} className="w-16 h-16 text-gray-400" />
                             ) : (
-                              <img 
-                                src={productImage} 
-                                alt={distribution.product.name}
+                              <img
+                                src={productImage}
+                                alt={productName}
                                 className="w-full h-full object-cover"
+                                onError={(e) => {
+                                  const img = e.currentTarget as HTMLImageElement;
+                                  // Fallback to a local background asset to avoid broken images
+                                  if (!img.src.includes('/assets/')) {
+                                    img.src = tiktokBackground as any;
+                                  }
+                                }}
                               />
                             )}
                           </div>
@@ -1052,7 +1165,7 @@ const Products = () => {
                             <input
                               type="checkbox"
                               checked={isSelected}
-                              onChange={() => handleDistributionSelect(distribution._id)}
+                              onChange={() => handleDistributionSelect(did)}
                               className="w-5 h-5 rounded border-gray-300 bg-white/90 backdrop-blur-sm"
                             />
                           </div>
@@ -1074,13 +1187,13 @@ const Products = () => {
                         <div className="p-4">
                           {/* Product Name */}
                           <h3 className="font-medium text-gray-900 mb-2 line-clamp-2">
-                            {distribution.product.name}
+                            {productName}
                           </h3>
 
                           {/* Category */}
                           <div className="mb-3">
                             <span className="px-2 py-1 text-xs font-medium bg-gray-100 text-gray-700 rounded-full">
-                              {currentLang.categories[distribution.product.category as keyof typeof currentLang.categories] || distribution.product.category}
+                              {productCategoryLabel}
                             </span>
                           </div>
 
@@ -1093,7 +1206,7 @@ const Products = () => {
                                 {currentLang.finalPrice}
                               </span>
                               <span className="text-sm font-medium text-gray-900">
-                                ${distribution.finalPrice.toFixed(2)}
+                                ${formatMoney((distribution as any)?.finalPrice ?? (distribution as any)?.sellerPrice ?? 0)}
                               </span>
                             </div>
 
@@ -1104,7 +1217,7 @@ const Products = () => {
                                 {currentLang.markup}
                               </span>
                               <span className="text-sm font-medium text-green-600">
-                                +${distribution.markup.toFixed(2)}
+                                +${formatMoney((distribution as any)?.markup ?? 0)}
                               </span>
                             </div>
 

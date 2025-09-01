@@ -83,6 +83,34 @@ const AdminProducts = () => {
     }
   }, []);
 
+  // Resolve images to absolute URLs for dev/proxy
+  const getBackendOrigin = () => {
+    try {
+      const envUrl = (import.meta as any)?.env?.VITE_BACKEND_URL;
+      if (envUrl) return String(envUrl);
+      if (typeof window !== 'undefined' && window.location?.origin) {
+        return window.location.origin.replace(':3000', ':5000');
+      }
+    } catch {}
+    return '';
+  };
+
+  const resolveImageUrl = (url?: string) => {
+    if (!url) return '';
+    const s = String(url).trim();
+    if (!s) return '';
+    if (/^data:|^https?:\/\//i.test(s)) return s;
+    const origin = getBackendOrigin();
+    if (!s.startsWith('/')) {
+      const path = `/uploads/products/${s}`;
+      return origin ? `${origin}${path}` : path;
+    }
+    if (s.startsWith('/uploads')) {
+      return origin ? `${origin}${s}` : s;
+    }
+    return s;
+  };
+
   const fetchSellers = useCallback(async () => {
     try {
       const response = await adminApi.getSellers();
@@ -207,10 +235,10 @@ const AdminProducts = () => {
       const formData = new FormData();
       formData.append('name', newProduct.name);
       formData.append('description', newProduct.description);
-      formData.append('price', newProduct.price.toString());
-      formData.append('category_id', newProduct.category_id);
-      formData.append('seller_id', newProduct.seller_id);
-      formData.append('is_active', newProduct.is_active.toString());
+      formData.append('price', String(newProduct.price ?? 0));
+      formData.append('category_id', String(newProduct.category_id ?? ''));
+      formData.append('seller_id', String(newProduct.seller_id ?? ''));
+      formData.append('is_active', String(!!newProduct.is_active));
 
       await adminApi.createProduct(formData);
       
@@ -244,9 +272,9 @@ const AdminProducts = () => {
       const formData = new FormData();
       formData.append('name', editingProduct.name);
       formData.append('description', editingProduct.description);
-      formData.append('price', editingProduct.price.toString());
-      formData.append('category_id', editingProduct.category_id);
-      formData.append('is_active', editingProduct.is_active.toString());
+      formData.append('price', String(editingProduct.price ?? 0));
+      formData.append('category_id', String(editingProduct.category_id ?? ''));
+      formData.append('is_active', String(!!editingProduct.is_active));
 
       await adminApi.updateProduct(editingProduct._id, formData);
       
@@ -429,10 +457,11 @@ const AdminProducts = () => {
                           <div className="flex-shrink-0 h-12 w-12">
                             {product.images && product.images.length > 0 ? (
                               <img
-                                src={product.images[0]}
+                                src={resolveImageUrl(product.images[0])}
                                 alt={product.name || 'Product'}
                                 className="h-12 w-12 rounded-lg object-cover"
                                 onError={(e) => {
+                                  // Fallback icon
                                   e.currentTarget.style.display = 'none';
                                   e.currentTarget.nextElementSibling?.classList.remove('hidden');
                                 }}
@@ -519,6 +548,16 @@ const AdminProducts = () => {
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                         <div className="flex justify-end gap-2">
+                          <a
+                            href={product._id ? `/product/${encodeURIComponent(product._id)}` : undefined}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className={`px-2 py-1 rounded text-xs ${product._id ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
+                            onClick={(e) => { if (!product._id) e.preventDefault(); }}
+                            title="View Product"
+                          >
+                            View Product
+                          </a>
                           <button
                             onClick={() => {
                               if (product._id && product) {

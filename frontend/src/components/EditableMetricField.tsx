@@ -1,12 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { 
-  faSave, 
-  faUndo, 
-  faTimes, 
-  faEdit,
-  faCheck,
-  faExclamationTriangle
+  faSave,
+  faUndo,
+  faTimes,
+  faExclamationTriangle,
+  faDollarSign,
+  faShoppingBag,
+  faEye,
+  faHeart,
+  faStar,
+  faCreditCard,
+  faChartLine
 } from '@fortawesome/free-solid-svg-icons';
 import { adminApi } from '../services/api';
 import { useNotifications } from '../contexts/NotificationContext';
@@ -20,6 +25,7 @@ interface EditableMetricFieldProps {
   label: string;
   format?: 'number' | 'currency' | 'percentage' | 'rating';
   isAdmin?: boolean;
+  period?: 'today' | 'last7days' | 'last30days' | 'total';
   onValueChange?: (newValue: number) => void;
   className?: string;
 }
@@ -32,6 +38,7 @@ const EditableMetricField: React.FC<EditableMetricFieldProps> = ({
   label,
   format = 'number',
   isAdmin = false,
+  period = 'total',
   onValueChange,
   className = ''
 }) => {
@@ -49,6 +56,8 @@ const EditableMetricField: React.FC<EditableMetricFieldProps> = ({
     const safeOriginal = typeof originalValue === 'number' && !isNaN(originalValue) ? originalValue : 0;
     return safeCurrent !== safeOriginal;
   });
+  // Optimistic display value after save so UI updates instantly
+  const [optimisticValue, setOptimisticValue] = useState<number | null>(null);
 
   useEffect(() => {
     // Ensure we have valid numbers, defaulting to 0 if undefined/null
@@ -57,6 +66,8 @@ const EditableMetricField: React.FC<EditableMetricFieldProps> = ({
     
     setEditValue(safeCurrentValue.toString());
     setHasOverride(safeCurrentValue !== safeOriginalValue);
+    // Clear optimistic value when upstream value changes
+    setOptimisticValue(null);
   }, [currentValue, originalValue]);
 
   const formatValue = (value: number) => {
@@ -117,15 +128,30 @@ const EditableMetricField: React.FC<EditableMetricFieldProps> = ({
       console.log(`🧪 Saving override:`, {
         sellerId,
         metricName,
+        period,
         newValue,
         currentValue,
         originalValue
       });
       
-      const response = await adminApi.saveSellerOverride(sellerId, metricName, newValue);
+      // Create the new structured payload format
+      const payload = {};
+      const periodKey = period === 'today' ? 'today' : 
+                       period === 'last7days' ? 'last7' : 
+                       period === 'last30days' ? 'last30' : 'total';
+      
+      // Add the underscore separator for multi-word metric names
+      const metricKey = `${periodKey}_${metricName}`;
+      payload[metricKey] = newValue;
+      
+      console.log(`📤 Sending new payload format:`, payload);
+      
+      // Use the new API endpoint that accepts the structured payload
+      const response = await adminApi.saveSellerOverride(sellerId, payload);
       console.log(`✅ Save response:`, response);
       
       setIsEditing(false);
+      setOptimisticValue(newValue);
       onValueChange?.(newValue);
       setHasOverride(true);
       showToast('Override saved successfully', 'success');
@@ -161,7 +187,7 @@ const EditableMetricField: React.FC<EditableMetricFieldProps> = ({
     setError(null);
 
     try {
-      await adminApi.resetSellerOverride(sellerId, metricName);
+      await adminApi.resetSellerOverride(sellerId, metricName, period);
       setIsEditing(false);
       setEditValue(originalValue.toString());
       onValueChange?.(originalValue);
@@ -186,7 +212,7 @@ const EditableMetricField: React.FC<EditableMetricFieldProps> = ({
     setError(null);
 
     try {
-      await adminApi.clearSellerOverride(sellerId, metricName);
+      await adminApi.clearSellerOverride(sellerId, metricName, period);
       setIsEditing(false);
       setEditValue('0');
       onValueChange?.(0);
@@ -205,18 +231,31 @@ const EditableMetricField: React.FC<EditableMetricFieldProps> = ({
   };
 
   const handleCancel = () => {
-    setIsEditing(false);
     const safeCurrentValue = typeof currentValue === 'number' && !isNaN(currentValue) ? currentValue : 0;
     setEditValue(safeCurrentValue.toString());
     setError(null);
   };
 
-  const handleEdit = () => {
-    if (!isAdmin) return;
-    setIsEditing(true);
-    const safeCurrentValue = typeof currentValue === 'number' && !isNaN(currentValue) ? currentValue : 0;
-    setEditValue(safeCurrentValue.toString());
-    setError(null);
+  // Choose an icon relevant to the metric instead of a generic edit icon
+  const getMetricIcon = () => {
+    switch (metricName) {
+      case 'orders_sold':
+        return faShoppingBag;
+      case 'total_sales':
+        return faDollarSign;
+      case 'profit_forecast':
+        return faChartLine;
+      case 'visitors':
+        return faEye;
+      case 'shop_followers':
+        return faHeart;
+      case 'shop_rating':
+        return faStar;
+      case 'credit_score':
+        return faCreditCard;
+      default:
+        return faChartLine;
+    }
   };
 
   if (!isAdmin) {
@@ -236,123 +275,74 @@ const EditableMetricField: React.FC<EditableMetricFieldProps> = ({
             )}
           </div>
           <div className="p-3 bg-black rounded-lg">
-            <FontAwesomeIcon icon={faEdit} className="w-6 h-6 text-white" />
+            <FontAwesomeIcon icon={getMetricIcon()} className="w-6 h-6 text-white" />
           </div>
         </div>
       </div>
     );
   }
 
+  // Admin view – inline edit with Enter to save and no action buttons
   return (
     <div className={`bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-lg border border-gray-200 ${className}`}>
       <div className="flex items-center justify-between mb-4">
         <div>
           <p className="text-sm font-medium text-gray-600">{label}</p>
           {hasOverride && (
-            <p className="text-xs text-blue-600">
-              Admin Override Active
-            </p>
+            <p className="text-xs text-blue-600">Admin Override Active</p>
           )}
         </div>
         <div className="p-3 bg-black rounded-lg">
-          <FontAwesomeIcon icon={faEdit} className="w-6 h-6 text-white" />
+          <FontAwesomeIcon icon={getMetricIcon()} className="w-6 h-6 text-white" />
         </div>
       </div>
 
-      {isEditing ? (
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              New Value
-            </label>
-            <input
-              type="number"
-              value={editValue}
-              onChange={(e) => setEditValue(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent"
-              placeholder="Enter new value"
-              min={metricName === 'shop_rating' ? 0 : metricName === 'credit_score' ? 300 : 0}
-              max={metricName === 'shop_rating' ? 5 : metricName === 'credit_score' ? 850 : undefined}
-              step={metricName === 'shop_rating' ? 0.1 : 1}
-            />
-          </div>
-
-          {error && (
-            <div className="flex items-center space-x-2 text-red-600 text-sm">
-              <FontAwesomeIcon icon={faExclamationTriangle} className="w-4 h-4" />
-              <span>{error}</span>
-            </div>
-          )}
-
-          <div className="flex items-center justify-between">
-            <div className="text-sm text-gray-500">
+      <div className="space-y-4">
+        <div>
+          <p className="text-2xl font-bold text-gray-900">
+            {formatValue(typeof (optimisticValue ?? currentValue) === 'number' && !isNaN((optimisticValue ?? currentValue) as any) ? (optimisticValue ?? (currentValue as number)) : 0)}
+          </p>
+          {hasOverride && (
+            <p className="text-sm text-gray-500">
               Original: {formatValue(typeof originalValue === 'number' && !isNaN(originalValue) ? originalValue : 0)}
-            </div>
-            <div className="flex space-x-2">
-              <button
-                onClick={handleCancel}
-                disabled={isSaving}
-                className="px-3 py-1 text-sm text-gray-600 hover:text-gray-800 disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={isSaving}
-                className="flex items-center space-x-1 px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700 disabled:opacity-50"
-              >
-                <FontAwesomeIcon icon={faSave} className="w-3 h-3" />
-                <span>Save</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <div>
-            <p className="text-2xl font-bold text-gray-900">
-              {formatValue(typeof currentValue === 'number' && !isNaN(currentValue) ? currentValue : 0)}
             </p>
-            {hasOverride && (
-              <p className="text-sm text-gray-500">
-                Original: {formatValue(typeof originalValue === 'number' && !isNaN(originalValue) ? originalValue : 0)}
-              </p>
-            )}
-          </div>
-
-          <div className="flex space-x-2">
-            <button
-              onClick={handleEdit}
-              className="flex items-center space-x-1 px-3 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition-colors"
-            >
-              <FontAwesomeIcon icon={faEdit} className="w-3 h-3" />
-              <span>Edit</span>
-            </button>
-            
-            {hasOverride && (
-              <>
-                <button
-                  onClick={handleReset}
-                  disabled={isSaving}
-                  className="flex items-center space-x-1 px-3 py-2 bg-yellow-600 text-white text-sm rounded hover:bg-yellow-700 disabled:opacity-50 transition-colors"
-                >
-                  <FontAwesomeIcon icon={faUndo} className="w-3 h-3" />
-                  <span>Reset</span>
-                </button>
-                
-                <button
-                  onClick={handleClear}
-                  disabled={isSaving}
-                  className="flex items-center space-x-1 px-3 py-2 bg-red-600 text-white text-sm rounded hover:bg-red-700 disabled:opacity-50 transition-colors"
-                >
-                  <FontAwesomeIcon icon={faTimes} className="w-3 h-3" />
-                  <span>Clear</span>
-                </button>
-              </>
-            )}
-          </div>
+          )}
         </div>
-      )}
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">New Value</label>
+          <input
+            type="number"
+            value={editValue}
+            onChange={(e) => setEditValue(e.target.value)}
+            onKeyDown={async (e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                await handleSave();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                handleCancel();
+              }
+            }}
+            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent"
+            placeholder="Type a value and press Enter"
+            min={metricName === 'shop_rating' ? 0 : metricName === 'credit_score' ? 300 : 0}
+            max={metricName === 'shop_rating' ? 5 : metricName === 'credit_score' ? 850 : undefined}
+            step={metricName === 'shop_rating' ? 0.1 : 1}
+          />
+        </div>
+
+        {error && (
+          <div className="flex items-center space-x-2 text-red-600 text-sm">
+            <FontAwesomeIcon icon={faExclamationTriangle} className="w-4 h-4" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        {isSaving && (
+          <div className="text-xs text-gray-500">Saving…</div>
+        )}
+      </div>
     </div>
   );
 };

@@ -215,7 +215,11 @@ const AddProduct = () => {
         } else if (key === 'tags') {
           submitData.append('tags', JSON.stringify(formData.tags));
         } else {
-          submitData.append(key, value.toString());
+          // Safely convert to string with sensible defaults
+          const v = (key === 'isActive' || key === 'isFeatured')
+            ? String(!!value)
+            : String(value ?? '');
+          submitData.append(key, v);
         }
       });
       

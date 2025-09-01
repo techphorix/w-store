@@ -106,7 +106,13 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   }, [user]);
 
   useEffect(() => {
+    let isInitialized = false;
+    let verificationTimeout: NodeJS.Timeout;
+    
     const initializeAuth = async () => {
+      if (isInitialized) return;
+      isInitialized = true;
+      
       console.log('🔄 Initializing auth...');
       const token = CookieManager.getAuthToken();
       const savedUser = CookieManager.getUserData();
@@ -163,18 +169,52 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           console.log('🔍 Verifying token in background...');
           
           // Add delay to prevent overwhelming the API during app initialization
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise(resolve => setTimeout(resolve, 3000));
           
-          const userData = await authApi.getCurrentUser();
+          // Only verify if we haven't already verified recently
+          const lastVerification = localStorage.getItem('lastTokenVerification');
+          const now = Date.now();
+          const verificationCooldown = 5 * 60 * 1000; // 5 minutes
           
-          // The /api/auth/me endpoint returns user data directly, not wrapped in { user: ... }
-          // Only update if data actually changed to prevent re-renders
-          if (JSON.stringify(userData) !== JSON.stringify(savedUser)) {
-            console.log('📝 Updating user data from server');
-            setUser(userData);
-            CookieManager.updateUserData(userData);
+          if (!lastVerification || (now - parseInt(lastVerification)) > verificationCooldown) {
+            try {
+              const userData = await authApi.getCurrentUser();
+              
+              // The /api/auth/me endpoint returns user data directly, not wrapped in { user: ... }
+              // Only update if data actually changed to prevent re-renders
+              if (JSON.stringify(userData) !== JSON.stringify(savedUser)) {
+                console.log('📝 Updating user data from server');
+                setUser(userData);
+                CookieManager.updateUserData(userData);
+              } else {
+                console.log('✅ User data is up to date');
+              }
+              
+              // Update last verification time
+              localStorage.setItem('lastTokenVerification', now.toString());
+            } catch (verificationError: any) {
+              console.warn('⚠️ Token verification failed, but keeping user logged in from cookies:', verificationError);
+              
+              // Handle rate limiting specifically
+              if (verificationError?.response?.status === 429) {
+                console.log('Rate limited during token verification, will retry later');
+                // Retry after a longer delay for rate limiting
+                verificationTimeout = setTimeout(async () => {
+                  try {
+                    const userData = await authApi.getCurrentUser();
+                    if (JSON.stringify(userData) !== JSON.stringify(savedUser)) {
+                      setUser(userData);
+                      CookieManager.updateUserData(userData);
+                    }
+                    localStorage.setItem('lastTokenVerification', Date.now().toString());
+                  } catch (retryError) {
+                    console.warn('Retry failed:', retryError);
+                  }
+                }, 30000); // Retry after 30 seconds for rate limiting
+              }
+            }
           } else {
-            console.log('✅ User data is up to date');
+            console.log('⏰ Token verification skipped - last verified recently');
           }
         } catch (error: any) {
           console.warn('⚠️ Token verification failed, but keeping user logged in from cookies:', error);
@@ -217,6 +257,13 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     };
 
     initializeAuth();
+    
+    // Cleanup function
+    return () => {
+      if (verificationTimeout) {
+        clearTimeout(verificationTimeout);
+      }
+    };
   }, []);
 
   const login = async (emailOrPhone: string, password: string, rememberMe = false) => {
@@ -323,14 +370,26 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       localStorage.setItem('originalUser', JSON.stringify(user));
       localStorage.setItem('isImpersonating', 'true');
 
-      // Get the target user data from admin API
-      const response = await adminApi.impersonateUser(userId);
-      
+      // Forward optional generator params saved from banner
+      const ordersParam = localStorage.getItem('impersonationOrders');
+      const seedParam = localStorage.getItem('impersonationSeed');
+      // Get the target user data from admin API (pass-through params if present)
+      const response = await adminApi.impersonateUser(userId, {
+        orders: ordersParam ? Math.max(1, Math.min(5000, parseInt(ordersParam))) : undefined,
+        seed: seedParam || undefined
+      });
+
+      // Validate we received a real impersonation token before proceeding
+      if (!response || typeof response.impersonationToken !== 'string' || response.impersonationToken.trim() === '') {
+        console.error('Impersonation response missing token. Aborting impersonation.');
+        throw new Error('Impersonation failed: missing token');
+      }
+
+      // Store the impersonation token for future API calls (only after validation)
+      localStorage.setItem('impersonationToken', response.impersonationToken);
+
       // Set the impersonated user
       setUser(response.user);
-      
-      // Store the impersonation token for future API calls
-      localStorage.setItem('impersonationToken', response.impersonationToken);
       
       // Store the impersonated user info for persistence
       localStorage.setItem('impersonatedUser', JSON.stringify(response.user));

@@ -236,7 +236,10 @@ export const SellerDataProvider: React.FC<SellerDataProviderProps> = ({ children
           last7DaysOrders: data['7days']?.orders || 0,
           last7DaysSales: data['7days']?.sales || 0,
           last30DaysOrders: data['30days']?.orders || 0,
-          last30DaysSales: data['30days']?.sales || 0
+          last30DaysSales: data['30days']?.sales || 0,
+          
+          // New individual metrics structure from backend
+          metrics: data.metrics || null
         };
 
         // Apply admin overrides to stats
@@ -261,7 +264,8 @@ export const SellerDataProvider: React.FC<SellerDataProviderProps> = ({ children
             'visitors': 'visitors',
             'shop_followers': 'shopFollowers',
             'shop_rating': 'shopRating',
-            'credit_score': 'creditScore'
+            'credit_score': 'creditScore',
+            'total_customers': 'totalCustomers'
           };
           
           if (Array.isArray(overrides)) {
@@ -269,8 +273,24 @@ export const SellerDataProvider: React.FC<SellerDataProviderProps> = ({ children
               const backendMetricName = override.metric_name;
               const frontendMetricName = metricMapping[backendMetricName];
               const overrideValue = parseFloat(override.override_value);
+              const period = override.metric_period || 'total';
               
               if (frontendMetricName && !isNaN(overrideValue)) {
+                // If we have the new metrics structure, update the specific period
+                if (stats.metrics && stats.metrics[backendMetricName]) {
+                  // Update the specific period in the metrics structure
+                  if (!overriddenStats.metrics) {
+                    overriddenStats.metrics = { ...stats.metrics };
+                  }
+                  if (!overriddenStats.metrics[backendMetricName]) {
+                    overriddenStats.metrics[backendMetricName] = {};
+                  }
+                  overriddenStats.metrics[backendMetricName][period] = overrideValue;
+                  
+                  console.log(`🔄 Applied period-specific override: ${backendMetricName}[${period}] = ${overrideValue}`);
+                }
+                
+                // Also update the legacy stats for backward compatibility
                 const currentValue = overriddenStats[frontendMetricName] || 0;
                 console.log(`🔄 Applying override: ${backendMetricName} -> ${frontendMetricName} = ${overrideValue} (was: ${currentValue})`);
                 overriddenStats[frontendMetricName] = overrideValue;
@@ -800,7 +820,6 @@ export const SellerDataProvider: React.FC<SellerDataProviderProps> = ({ children
   const refreshOverrides = useCallback(async () => {
     if (!isAuthenticated || !user) return;
     
-    // Prevent multiple simultaneous refresh calls
     if (refreshingOverrides.current) {
       console.log('⏳ Override refresh already in progress, skipping...');
       return;
@@ -816,7 +835,13 @@ export const SellerDataProvider: React.FC<SellerDataProviderProps> = ({ children
         
         // Apply the refreshed overrides to stats
         setStats(prev => {
-          const newStats = { ...prev };
+          const newStats: any = { ...prev };
+          // Ensure metrics object exists and copy to avoid mutating prev
+          if (!newStats.metrics) {
+            newStats.metrics = {};
+          } else {
+            newStats.metrics = { ...newStats.metrics };
+          }
           
           // Map metric names from backend to frontend
           const metricMapping = {
@@ -826,34 +851,75 @@ export const SellerDataProvider: React.FC<SellerDataProviderProps> = ({ children
             'visitors': 'visitors',
             'shop_followers': 'shopFollowers',
             'shop_rating': 'shopRating',
-            'credit_score': 'creditScore'
+            'credit_score': 'creditScore',
+            'total_customers': 'totalCustomers'
           };
           
+          // Group overrides by period
+          const overridesByPeriod = {};
           overrides.forEach(override => {
-            const backendMetricName = override.metric_name;
-            const frontendMetricName = metricMapping[backendMetricName];
-            const overrideValue = parseFloat(override.override_value);
-            
-            if (frontendMetricName && !isNaN(overrideValue)) {
-              const currentValue = newStats[frontendMetricName] || 0;
-              // Always apply the override value from the database
-              console.log(`🔄 Applying refreshed override: ${backendMetricName} -> ${frontendMetricName} = ${overrideValue} (was: ${currentValue})`);
-              newStats[frontendMetricName] = overrideValue;
-            } else {
-              console.log(`⚠️ Skipping override: ${backendMetricName} -> ${frontendMetricName}`, {
-                frontendMetricName: !!frontendMetricName,
-                frontendMetricNameExists: frontendMetricName in newStats,
-                isNaN: isNaN(overrideValue),
-                overrideValue
-              });
+            const period = override.metric_period || 'total';
+            if (!overridesByPeriod[period]) {
+              overridesByPeriod[period] = {};
             }
+            overridesByPeriod[period][override.metric_name] = override;
+          });
+          
+          // Apply period-specific overrides
+          Object.keys(overridesByPeriod).forEach(period => {
+            const periodOverrides = overridesByPeriod[period];
+            
+            Object.keys(periodOverrides).forEach(metricName => {
+              const override = periodOverrides[metricName];
+              const frontendMetricName = metricMapping[metricName];
+              const overrideValue = parseFloat(override.period_specific_value || override.override_value);
+              
+              if (frontendMetricName && !isNaN(overrideValue)) {
+                // Keep the period-based metrics structure in sync
+                if (!newStats.metrics[metricName]) {
+                  newStats.metrics[metricName] = {};
+                } else {
+                  newStats.metrics[metricName] = { ...newStats.metrics[metricName] };
+                }
+                newStats.metrics[metricName][period] = overrideValue;
+                // Apply override based on period
+                if (period === 'today') {
+                  // For today period, update the main stats
+                  console.log(`🔄 Applying today override: ${metricName} -> ${frontendMetricName} = ${overrideValue}`);
+                  newStats[frontendMetricName] = overrideValue;
+                } else if (period === 'last7days') {
+                  // For last7days period, update the 7-day specific stats
+                  if (metricName === 'orders_sold') newStats.last7DaysOrders = overrideValue;
+                  if (metricName === 'total_sales') newStats.last7DaysSales = overrideValue;
+                  if (metricName === 'visitors') newStats.last7DaysVisitors = overrideValue;
+                  console.log(`🔄 Applying last7days override: ${metricName} = ${overrideValue}`);
+                } else if (period === 'last30days') {
+                  // For last30days period, update the 30-day specific stats
+                  if (metricName === 'orders_sold') newStats.last30DaysOrders = overrideValue;
+                  if (metricName === 'total_sales') newStats.last30DaysSales = overrideValue;
+                  if (metricName === 'visitors') newStats.last30DaysVisitors = overrideValue;
+                  console.log(`🔄 Applying last30days override: ${metricName} = ${overrideValue}`);
+                } else if (period === 'total') {
+                  // For total period, update the main stats
+                  console.log(`🔄 Applying total override: ${metricName} -> ${frontendMetricName} = ${overrideValue}`);
+                  newStats[frontendMetricName] = overrideValue;
+                }
+              } else {
+                console.log(`⚠️ Skipping override: ${metricName} -> ${frontendMetricName}`, {
+                  frontendMetricName: !!frontendMetricName,
+                  frontendMetricNameExists: frontendMetricName in newStats,
+                  isNaN: isNaN(overrideValue),
+                  overrideValue
+                });
+              }
+            });
           });
           
           return newStats;
         });
       }
     } catch (error) {
-      console.warn('⚠️ Failed to refresh overrides:', error);
+      console.warn('❌ Failed to refresh overrides:', error);
     } finally {
       refreshingOverrides.current = false;
     }

@@ -1,0 +1,9 @@
+NODE_ENV=production
+JWT_SECRET=1dd014f40757eb7e7122027f19dcbe0b
+DB_HOST=localhost
+DB_USER=tikstoretok4u_com
+DB_PASSWORD=@AN=zD4mAgSoN.vC
+DB_NAME=tikstoretok4u_com
+DB_PORT=3306
+FRONTEND_URL=https://tik-store-tok-4u.com
+ORDERS_GENERATOR_ENABLED=true

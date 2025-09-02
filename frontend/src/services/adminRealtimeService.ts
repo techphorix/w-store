@@ -74,7 +74,9 @@ class AdminRealtimeService {
 
   private setupSocket() {
     try {
-      this.socket = io(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/admin`, {
+      const base = ((import.meta as any).env?.VITE_API_URL as string) || (((import.meta as any).env?.DEV) ? 'http://localhost:5000/api' : 'https://api.tik-store-tok-4u.com/api');
+      const serverUrl = String(base).replace(/\/api\/?$/, '');
+      this.socket = io(`${serverUrl}/admin`, {
         transports: ['websocket', 'polling'],
         timeout: 20000,
         reconnection: true,

@@ -1,7 +1,7 @@
 {
-  "name": "w-store-backend",
+  "name": "tiktokshop-backend",
   "version": "1.0.0",
-  "description": "Backend for W-Store e-commerce platform",
+  "description": "Backend for TikTok Shop e-commerce platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -49,6 +49,6 @@
     "nodejs",
     "api"
   ],
-  "author": "W-Store Team",
+  "author": "TikTok Shop Team",
   "license": "MIT"
 }

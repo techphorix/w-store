@@ -3816,7 +3816,7 @@ router.get('/settings', asyncHandler(async (req, res) => {
     // For now, return default system settings
     // In a real application, these would be stored in a database
     const systemSettings = {
-      site_name: 'W-Store',
+      site_name: 'TikTok Shop',
       site_description: 'E-commerce platform for sellers and customers',
       maintenance_mode: false,
       registration_enabled: true,
@@ -3836,7 +3836,7 @@ router.get('/settings', asyncHandler(async (req, res) => {
         smtp_host: process.env.SMTP_HOST || 'smtp.gmail.com',
         smtp_port: parseInt(process.env.SMTP_PORT) || 587,
         smtp_user: process.env.SMTP_USER || '',
-        smtp_from: process.env.SMTP_FROM || 'noreply@wstore.com'
+        smtp_from: process.env.SMTP_FROM || 'noreply@tiktokshop.com'
       },
       payment_settings: {
         currency: 'USD',

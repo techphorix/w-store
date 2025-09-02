@@ -37,7 +37,8 @@ class SocketService {
       return;
     }
 
-    const serverUrl = import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:5000';
+    const base = ((import.meta as any).env?.VITE_API_URL as string) || (((import.meta as any).env?.DEV) ? 'http://localhost:5000/api' : 'https://api.tik-store-tok-4u.com/api');
+    const serverUrl = String(base).replace(/\/api\/?$/, '');
     
     this.socket = io(serverUrl, {
       auth: {

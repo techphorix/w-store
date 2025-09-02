@@ -34,7 +34,7 @@ const logFormat = winston.format.combine(
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
   format: logFormat,
-  defaultMeta: { service: 'wstore-backend' },
+  defaultMeta: { service: 'tiktokshop-backend' },
   transports: [
     // Console transport
     new winston.transports.Console({

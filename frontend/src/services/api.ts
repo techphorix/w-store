@@ -1,9 +1,25 @@
 import axios from 'axios';
 import CookieManager from '../utils/cookieManager';
 
+// Resolve API base URL robustly
+function ensureApiSuffix(url: string) {
+  const trimmed = (url || '').trim().replace(/\/$/, '');
+  if (!trimmed) return '';
+  return /\/api\/?$/.test(trimmed) ? trimmed : `${trimmed}/api`;
+}
+
+const resolvedBase = (() => {
+  const envUrl = (import.meta as any).env?.VITE_API_URL as string | undefined;
+  if (envUrl && envUrl.trim()) return ensureApiSuffix(envUrl);
+  // In dev, hit Vite proxy for same-origin cookies
+  if ((import.meta as any).env?.DEV) return '/api';
+  // Production fallback
+  return 'https://api.tik-store-tok-4u.com/api';
+})();
+
 // Create axios instance with proper configuration
 const api = axios.create({
-  baseURL: '/api', // Use relative path since Vite proxy is configured
+  baseURL: resolvedBase,
   timeout: 10000,
   withCredentials: true, // Important for cookies
 });

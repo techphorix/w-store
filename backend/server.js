@@ -25,6 +25,7 @@ const distributionRoutes = require('./routes/distributions');
 const uploadRoutes = require('./routes/uploads');
 const categoryRoutes = require('./routes/categories');
 const sellerRoutes = require('./routes/seller');
+const healthRoutes = require('./routes/health');
 
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
@@ -40,10 +41,17 @@ const RealtimeService = require('./services/realtimeService');
 
 const app = express();
 const server = http.createServer(app);
+const allowedOrigin = process.env.FRONTEND_URL || "https://tik-store-tok-4u.com";
+const allowedOrigins = [allowedOrigin];
+if ((process.env.NODE_ENV || '').toLowerCase() !== 'production') {
+  allowedOrigins.push('http://localhost:3000');
+}
+
 const io = socketIo(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    methods: ["GET", "POST"]
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
@@ -55,7 +63,7 @@ app.use(helmet());
 app.use(compression());
 app.use(morgan('combined', { stream: { write: message => logger.info(message.trim()) } }));
 app.use(cors({
-  origin: process.env.FRONTEND_URL || "http://localhost:3000",
+  origin: allowedOrigins,
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
@@ -70,20 +78,38 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
   setHeaders: (res) => {
     // Allow embedding/consumption from another origin (frontend dev server)
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    if (process.env.FRONTEND_URL) {
-      res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL);
-    }
+    res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL || 'https://tik-store-tok-4u.com');
   }
 }));
 
-// Health check (no rate limiting)
-app.get('/health', (req, res) => {
+// Root API endpoint
+app.get('/api', (req, res) => {
   res.status(200).json({ 
-    status: 'OK', 
+    message: 'TikTok Shop API is running',
+    version: '1.0.0',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    endpoints: [
+      '/api/auth',
+      '/api/products', 
+      '/api/orders',
+      '/api/users',
+      '/api/admin',
+      '/api/categories',
+      '/api/notifications',
+      '/api/analytics',
+      '/api/finance',
+      '/api/search',
+      '/api/distributions',
+      '/api/uploads',
+      '/api/seller',
+      '/api/health'
+    ]
   });
 });
+
+// Health routes (no rate limiting)
+app.use('/api/health', healthRoutes);
+app.use('/health', healthRoutes); // Keep backward compatibility
 
 // API Routes with specific rate limiting
 // Apply refresh rate limiter specifically to refresh endpoint FIRST

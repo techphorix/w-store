@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: w-store-backend
+    name: tik-store-tok-4u-api
     env: node
     plan: starter
     buildCommand: npm install
@@ -10,5 +10,9 @@ services:
         value: production
       - key: PORT
         value: 10000
+      - key: FRONTEND_URL
+        value: https://tik-store-tok-4u.com
     healthCheckPath: /health
     autoDeploy: true
+    customDomains:
+      - api.tik-store-tok-4u.com

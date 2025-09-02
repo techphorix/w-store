@@ -18,5 +18,8 @@
         }
       ]
     }
-  ]
+  ],
+  "env": {
+    "VITE_API_URL": "https://api.tik-store-tok-4u.com/api"
+  }
 }

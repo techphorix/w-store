@@ -1,0 +1,21 @@
+# Passenger configuration for Node.js
+PassengerEnabled on
+PassengerAppType node
+PassengerAppRoot /public_html/api
+PassengerNodejs /usr/bin/node
+PassengerStartupFile server.js
+PassengerAppEnv production
+
+# Set environment variables
+SetEnv NODE_ENV production
+SetEnv PORT 3000
+
+# Error handling
+PassengerFriendlyErrorPages on
+PassengerLogLevel 3
+
+# Memory and process limits
+PassengerMaxPoolSize 6
+PassengerMinInstances 1
+PassengerMaxInstances 6
+PassengerPoolIdleTime 300

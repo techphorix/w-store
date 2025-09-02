@@ -4,6 +4,11 @@ import react from '@vitejs/plugin-react'
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+  define: {
+    // Do not hardcode a production default here.
+    // Let runtime code decide sensible defaults for dev/prod.
+    'import.meta.env.VITE_API_URL': JSON.stringify(process.env.VITE_API_URL || '')
+  },
   server: {
     port: 3000,
     proxy: {

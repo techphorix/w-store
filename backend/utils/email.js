@@ -25,19 +25,19 @@ const sendVerificationEmail = async (email, fullName, token) => {
     const verificationUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-email?token=${token}`;
     
     const mailOptions = {
-      from: process.env.SMTP_FROM || 'noreply@wstore.com',
+      from: process.env.SMTP_FROM || 'noreply@tiktokshop.com',
       to: email,
-      subject: 'Verify Your Email - W-Store',
+      subject: 'Verify Your Email - TikTok Shop',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
           <div style="text-align: center; margin-bottom: 30px;">
-            <h1 style="color: #333; margin-bottom: 10px;">Welcome to W-Store!</h1>
+            <h1 style="color: #333; margin-bottom: 10px;">Welcome to TikTok Shop!</h1>
             <p style="color: #666; font-size: 16px;">Hi ${fullName},</p>
           </div>
           
           <div style="background-color: #f8f9fa; padding: 30px; border-radius: 10px; margin-bottom: 30px;">
             <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-              Thank you for registering with W-Store! To complete your registration and activate your account, 
+              Thank you for registering with TikTok Shop! To complete your registration and activate your account, 
               please click the button below to verify your email address.
             </p>
             
@@ -59,12 +59,12 @@ const sendVerificationEmail = async (email, fullName, token) => {
           
           <div style="text-align: center; color: #666; font-size: 14px;">
             <p>This verification link will expire in 24 hours.</p>
-            <p>If you didn't create an account with W-Store, you can safely ignore this email.</p>
+            <p>If you didn't create an account with TikTok Shop, you can safely ignore this email.</p>
           </div>
           
           <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center;">
             <p style="color: #999; font-size: 12px;">
-              © ${new Date().getFullYear()} W-Store. All rights reserved.
+              © ${new Date().getFullYear()} TikTok Shop. All rights reserved.
             </p>
           </div>
         </div>
@@ -89,9 +89,9 @@ const sendPasswordResetEmail = async (email, fullName, token) => {
     const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${token}`;
     
     const mailOptions = {
-      from: process.env.SMTP_FROM || 'noreply@wstore.com',
+      from: process.env.SMTP_FROM || 'noreply@tiktokshop.com',
       to: email,
-      subject: 'Reset Your Password - W-Store',
+      subject: 'Reset Your Password - TikTok Shop',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
           <div style="text-align: center; margin-bottom: 30px;">
@@ -101,7 +101,7 @@ const sendPasswordResetEmail = async (email, fullName, token) => {
           
           <div style="background-color: #f8f9fa; padding: 30px; border-radius: 10px; margin-bottom: 30px;">
             <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-              We received a request to reset your password for your W-Store account. 
+              We received a request to reset your password for your TikTok Shop account. 
               If you made this request, click the button below to create a new password.
             </p>
             
@@ -137,7 +137,7 @@ const sendPasswordResetEmail = async (email, fullName, token) => {
           
           <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center;">
             <p style="color: #999; font-size: 12px;">
-              © ${new Date().getFullYear()} W-Store. All rights reserved.
+              © ${new Date().getFullYear()} TikTok Shop. All rights reserved.
             </p>
           </div>
         </div>
@@ -162,20 +162,20 @@ const sendWelcomeEmail = async (email, fullName, role) => {
     const dashboardUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard`;
     
     const mailOptions = {
-      from: process.env.SMTP_FROM || 'noreply@wstore.com',
+      from: process.env.SMTP_FROM || 'noreply@tiktokshop.com',
       to: email,
-      subject: 'Welcome to W-Store!',
+      subject: 'Welcome to TikTok Shop!',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
           <div style="text-align: center; margin-bottom: 30px;">
-            <h1 style="color: #333; margin-bottom: 10px;">Welcome to W-Store!</h1>
+            <h1 style="color: #333; margin-bottom: 10px;">Welcome to TikTok Shop!</h1>
             <p style="color: #666; font-size: 16px;">Hi ${fullName},</p>
           </div>
           
           <div style="background-color: #f8f9fa; padding: 30px; border-radius: 10px; margin-bottom: 30px;">
             <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
               Congratulations! Your account has been successfully created and verified. 
-              You're now ready to start using W-Store.
+              You're now ready to start using TikTok Shop.
             </p>
             
             ${role === 'seller' ? `
@@ -213,7 +213,7 @@ const sendWelcomeEmail = async (email, fullName, role) => {
           
           <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center;">
             <p style="color: #999; font-size: 12px;">
-              © ${new Date().getFullYear()} W-Store. All rights reserved.
+              © ${new Date().getFullYear()} TikTok Shop. All rights reserved.
             </p>
           </div>
         </div>
@@ -236,13 +236,13 @@ const sendNotificationEmail = async (email, fullName, notification) => {
     const transporter = createTransporter();
     
     const mailOptions = {
-      from: process.env.SMTP_FROM || 'noreply@wstore.com',
+      from: process.env.SMTP_FROM || 'noreply@tiktokshop.com',
       to: email,
       subject: notification.title,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
           <div style="text-align: center; margin-bottom: 30px;">
-            <h1 style="color: #333; margin-bottom: 10px;">W-Store Notification</h1>
+            <h1 style="color: #333; margin-bottom: 10px;">TikTok Shop Notification</h1>
             <p style="color: #666; font-size: 16px;">Hi ${fullName},</p>
           </div>
           
@@ -265,7 +265,7 @@ const sendNotificationEmail = async (email, fullName, notification) => {
           
           <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center;">
             <p style="color: #999; font-size: 12px;">
-              © ${new Date().getFullYear()} W-Store. All rights reserved.
+              © ${new Date().getFullYear()} TikTok Shop. All rights reserved.
             </p>
           </div>
         </div>
